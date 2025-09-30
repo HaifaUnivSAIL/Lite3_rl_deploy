@@ -1,3 +1,18 @@
 Fri Aug 29 07:31:39 2025
 WARNING: OpenGL error 0x502 in or before mjr_makeContext
 
+Sun Sep 21 12:21:23 2025
+ERROR: could not create window
+
+Sun Sep 21 12:21:35 2025
+ERROR: could not create window
+
+Sun Sep 21 12:22:01 2025
+ERROR: could not create window
+
+Sun Sep 21 12:24:15 2025
+ERROR: could not create window
+
+Sun Sep 21 12:24:46 2025
+ERROR: could not create window
+
