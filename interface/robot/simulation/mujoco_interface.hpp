@@ -19,6 +19,8 @@
 #include <iostream>
 #include <cstring>
 #include <random>
+#include <algorithm>
+#include <cmath>
 
 
 #include <atomic>
@@ -43,6 +45,9 @@ private:
     Vec3d omega_body_, rpy_, acc_;
 
     VecXd joint_pos_, joint_vel_, joint_tau_;
+    VecXd default_joint_pos_;
+    Vec4d default_base_quat_;
+    Vec3d default_base_pos_;
 
 
     double dt_ = 0.001;
@@ -65,6 +70,14 @@ public:
         joint_tau_ = VecXd::Zero(dof_num_);
         joint_vel_ = VecXd::Zero(dof_num_);
         joint_cmd_ = MatXf::Zero(dof_num_, 5);
+        default_joint_pos_.resize(dof_num_);
+        default_joint_pos_ <<
+            0.0, -0.2, 0.1,
+            0.0, -0.2, 0.1,
+            0.0, -1.0, 1.8,
+            0.0, -1.0, 1.8;
+        default_base_pos_ << 0.0, 0.0, 0.32;
+        default_base_quat_ << 1.0, 0.0, 0.0, 0.0;
 
         
 
@@ -184,7 +197,7 @@ private:
 
         glfwSwapInterval(1);
 
-        mj_forward(model_, data_);
+        ApplyInitialPose();
         
         
         
@@ -268,6 +281,31 @@ private:
         mjr_render(viewport, &scene_, &context_);
         glfwSwapBuffers(window_);
         glfwPollEvents();
+    }
+
+    void ApplyInitialPose() {
+        mj_resetData(model_, data_);
+
+        data_->qpos[0] = default_base_pos_(0);
+        data_->qpos[1] = default_base_pos_(1);
+        data_->qpos[2] = default_base_pos_(2);
+        data_->qpos[3] = default_base_quat_(0);
+        data_->qpos[4] = default_base_quat_(1);
+        data_->qpos[5] = default_base_quat_(2);
+        data_->qpos[6] = default_base_quat_(3);
+
+        for (int i = 0; i < dof_num_; ++i) {
+            data_->qpos[7 + i] = default_joint_pos_(i);
+        }
+
+        std::fill_n(data_->qvel, model_->nv, 0.0);
+        std::fill_n(data_->ctrl, model_->nu, 0.0);
+
+        mj_forward(model_, data_);
+        UpdateImu();
+        UpdateJointState();
+        run_time_ = 0.0;
+        run_cnt_ = 0;
     }
 };
 

@@ -47,6 +47,11 @@ public:
      */
     virtual void SetMotionStateFeedback(const MotionStateFeedback& msfb) = 0;
 
+    /**
+     * @brief Optional hook to override the current command (used for scripted/debug control)
+     */
+    virtual void SetUserCommand(const UserCommand& cmd) { (void)cmd; }
+
     MotionStateFeedback msfb_;
 };
 };

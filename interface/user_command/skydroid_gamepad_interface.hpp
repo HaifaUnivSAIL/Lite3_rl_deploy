@@ -4,6 +4,7 @@
 #include "user_command_interface.h"
 #include "skydroid_gamepad.h"
 #include "custom_types.h"
+#include <atomic>
 
 using namespace interface;
 using namespace types;
@@ -28,6 +29,7 @@ private:
     bool transform_cmd_flag_ = true;
     std::thread transform_thread_;
     bool first_flag_ = true;
+    std::atomic<bool> override_active_{false};
     
     
 public:
@@ -37,6 +39,7 @@ public:
     virtual void Start();
     virtual void Stop();
     virtual UserCommand GetUserCommand(); 
+    virtual void SetUserCommand(const UserCommand& cmd) override { usr_cmd_ = cmd; override_active_.store(true); }
 
     void TransformSkydroidToUserCommand();
     
@@ -87,9 +90,11 @@ void SkydroidGamepadInterface::TransformSkydroidToUserCommand(){
             continue;
         }
         // std::cout << "axis: " << int(sd_keys_.A) << std::endl;
-        usr_cmd_.forward_vel_scale = sd_keys_.left_axis_y;
-        usr_cmd_.side_vel_scale = -sd_keys_.left_axis_x;
-        usr_cmd_.turnning_vel_scale = -sd_keys_.right_axis_x;
+        if (!override_active_.load()) {
+            usr_cmd_.forward_vel_scale = sd_keys_.left_axis_y;
+            usr_cmd_.side_vel_scale = -sd_keys_.left_axis_x;
+            usr_cmd_.turnning_vel_scale = -sd_keys_.right_axis_x;
+        }
         if (!IsKeysEqual(sd_keys_, sd_keys_record_)) {
             switch (msfb_.current_state){
             case RobotMotionState::WaitingForStand:

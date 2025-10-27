@@ -13,6 +13,8 @@
 
 #include "common_types.h"
 #include "custom_types.h"
+#include <cstdlib>
+#include <sstream>
 
 using namespace types;
 
@@ -27,6 +29,7 @@ public:
         else{
             std::cerr << "Not Deafult Robot" << std::endl;
         }
+        MaybeLoadRlCommandOverride();
     }
     ~ControlParameters(){}
 
@@ -71,6 +74,26 @@ public:
      */
     std::string common_policy_path_;
     Vec3f common_policy_p_gain_, common_policy_d_gain_;
+
+    /**
+     * @brief Optional override for default normalized command used in RL mode (debug/testing)
+     */
+    Vec3f rl_command_override_ = Vec3f::Zero();
+    bool enable_rl_command_override_ = false;
+
+    void MaybeLoadRlCommandOverride() {
+        const char* env = std::getenv("LITE3_DEFAULT_CMD");
+        if (!env) return;
+        std::stringstream ss(env);
+        float x = 0.f, y = 0.f, z = 0.f;
+        if (!(ss >> x >> y >> z)) {
+            std::cerr << "[ControlParameters] Failed to parse LITE3_DEFAULT_CMD env (expected three floats)" << std::endl;
+            return;
+        }
+        rl_command_override_ << x, y, z;
+        enable_rl_command_override_ = true;
+        std::cout << "[ControlParameters] Using RL command override: " << rl_command_override_.transpose() << std::endl;
+    }
 
     // std::string speed_policy_path_;
     // Vec3f speed_policy_p_gain_, speed_policy_d_gain_;

@@ -1,334 +1,347 @@
 /**
  * @file lite3_test_policy_runner_onnx.hpp
- * @brief ONNX policy runner with history stacking and runtime IO discovery
- *        (updated to support 117-dim obs + 40-frame history = 4797 total)
+ * @brief ONNX policy runner for Lite3 two-leg stand (117-D obs × 40 history).
+ *
+ * Observation layout mirrors training exactly:
+ *   obs = [cmd(3), rpy(3), body_omega(3),
+ *          dof_pos(12), dof_vel*0.1(12),
+ *          pos_hist(3×12), vel_hist(2×12), target_hist(2×12)]
+ * The flattened ONNX input is [current_obs, history_frame0, ..., history_frame39]
+ * with history frames managed like rsl_rl's HistoryWrapper (oldest first).
  */
 
 #ifndef LITE3_TEST_POLICY_RUNNER_ONNX_HPP_
 #define LITE3_TEST_POLICY_RUNNER_ONNX_HPP_
 
 #include "policy_runner_base.hpp"
-#include <onnxruntime_cxx_api.h>
 
+#include <onnxruntime_cxx_api.h>
 #include <Eigen/Dense>
-#include <string>
-#include <vector>
-#include <deque>
-#include <unordered_map>
-#include <iostream>
+
+#include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <deque>
+#include <fstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 using namespace types;
-using VecXf = Eigen::VectorXf;
-using Vec3f = Eigen::Vector3f;
 
 class Lite3TestPolicyRunnerONNX : public PolicyRunnerBase {
-private:
-    // ----- model / ORT -----
-    std::string model_path_;
-    Ort::Env env_;
-    Ort::SessionOptions session_options_;
-    Ort::Session session_;
-    Ort::AllocatorWithDefaultOptions alloc_;
-    Ort::MemoryInfo memory_info_{Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)};
-
-    // Names discovered from the ONNX (don’t hard-code "obs"/"actions")
-    std::string input_name_;
-    std::string output_name_;
-
-    // Input dims from ONNX
-    int64_t input_dim_total_{-1};  // e.g., 4797
-
-    // ----- observation/action layout -----
-    // IMPORTANT: Set to the *current* single-frame obs size your model expects
-    // Your trained model uses 117 (and history length derived below).
-    static constexpr int kObsDim = 117;
-    static constexpr int kActDim = 12;
-
-    // We keep the original 45 signals you already compute, and zero-fill the rest (72)
-    static constexpr int kObsDimRunnerLegacy = 45;
-    static_assert(kObsDim >= kObsDimRunnerLegacy, "kObsDim must be >= legacy runner obs size");
-
-    int obs_dim_{kObsDim};   // single-frame obs count (117)
-    int act_dim_{kActDim};   // action dim (12)
-    int hist_n_{0};          // history length derived from ONNX input: (total - obs_dim) / obs_dim
-
-    // Rolling history of past single-frame observations (each length = obs_dim_)
-    std::deque<VecXf> history_;
-
-    // ----- working buffers -----
-    VecXf current_obs_;      // [obs_dim_]
-    VecXf last_action_;      // [act_dim_]
-    VecXf joint_pos_rl_;     // [act_dim_], policy order
-    VecXf joint_vel_rl_;     // [act_dim_], policy order
-
-    VecXf tmp_action_;       // [act_dim_]
-    VecXf action_;           // [act_dim_]
-    Vec3f gravity_direction_ = Vec3f(0.f, 0.f, -1.f);
-
-    VecXf dof_pos_default_robot_, dof_pos_default_policy_;
-    VecXf kp_, kd_;
-    Vec3f max_cmd_vel_;
-    float omega_scale_   = 0.25f;
-    float dof_vel_scale_ = 0.05f;
-
-    std::vector<int> robot2policy_idx_, policy2robot_idx_;
-    std::vector<std::string> robot_order_{
-        "FL_HipX_joint", "FL_HipY_joint", "FL_Knee_joint",
-        "FR_HipX_joint", "FR_HipY_joint", "FR_Knee_joint",
-        "HL_HipX_joint", "HL_HipY_joint", "HL_Knee_joint",
-        "HR_HipX_joint", "HR_HipY_joint", "HR_Knee_joint"
-    };
-    std::vector<std::string> policy_order_ = robot_order_;
-
-    std::vector<float> action_scale_robot_{
-        0.125f, 0.25f, 0.25f,
-        0.125f, 0.25f, 0.25f,
-        0.125f, 0.25f, 0.25f,
-        0.125f, 0.25f, 0.25f
-    };
-
-    RobotAction ra_;
-
-    // ----- helpers -----
-    static std::vector<int> generate_permutation(
-        const std::vector<std::string>& from,
-        const std::vector<std::string>& to,
-        int default_index = 0)
-    {
-        std::unordered_map<std::string,int> idx;
-        for (int i = 0; i < (int)from.size(); ++i) idx[from[i]] = i;
-        std::vector<int> perm; perm.reserve(to.size());
-        for (const auto& name : to) {
-            auto it = idx.find(name);
-            perm.push_back(it == idx.end() ? default_index : it->second);
-        }
-        return perm;
-    }
-
-    void discover_io_and_histlen_() {
-        // input/output names
-        input_name_  = session_.GetInputNameAllocated(0, alloc_).get();
-        output_name_ = session_.GetOutputNameAllocated(0, alloc_).get();
-
-        // input dims
-        auto ti   = session_.GetInputTypeInfo(0);
-        auto tsv  = ti.GetTensorTypeAndShapeInfo();
-        auto dims = tsv.GetShape(); // expect {1, N}
-        if (dims.size() != 2 || dims[0] != 1) {
-            std::cerr << "[ONNX] Unexpected input rank; got ";
-            for (auto d : dims) std::cerr << d << " ";
-            std::cerr << std::endl;
-        }
-        input_dim_total_ = dims[1];
-
-        // derive history length: total = obs_dim + obs_dim*hist_n
-        const int64_t remainder = input_dim_total_ - obs_dim_;
-        if (remainder >= 0 && remainder % obs_dim_ == 0) {
-            hist_n_ = static_cast<int>(remainder / obs_dim_);
-        } else {
-            // Fallback: assume no history if model shape doesn’t align
-            hist_n_ = 0;
-        }
-
-        std::cout << "[ONNX IO] input='" << input_name_
-                  << "' total=" << input_dim_total_
-                  << " obs_dim=" << obs_dim_
-                  << " hist_n=" << hist_n_ << std::endl;
-
-        // (Optional) verify output dims once
-        auto to = session_.GetOutputTypeInfo(0);
-        auto tov = to.GetTensorTypeAndShapeInfo();
-        auto odims = tov.GetShape(); // e.g., {1, 12}
-        std::cout << "[ONNX IO] output='" << output_name_
-                  << "' shape=[" << (odims.size() > 0 ? odims[0] : -1)
-                  << "," << (odims.size() > 1 ? odims[1] : -1) << "]" << std::endl;
-    }
-
-    // Build a 117-dim single-frame obs from current robot state
-    // We fill the first 45 with your existing features, and zero-fill the remaining 72 for now.
-    // Later we’ll replace the zero-fill with the exact features from training.
-    void build_current_obs_(const RobotBasicState& ro) {
-        // Precompute basic terms (same as your original code)
-        Vec3f base_omega = ro.base_omega * omega_scale_;
-        Vec3f projected_gravity = ro.base_rot_mat.inverse() * gravity_direction_;
-        Vec3f cmd_vel = ro.cmd_vel_normlized.cwiseProduct(max_cmd_vel_);
-
-        // joints to policy order
-        for (int i = 0; i < act_dim_; ++i) {
-            joint_pos_rl_(i) = ro.joint_pos(robot2policy_idx_[i]);
-            joint_vel_rl_(i) = ro.joint_vel(robot2policy_idx_[i]) * dof_vel_scale_;
-        }
-        joint_pos_rl_ -= dof_pos_default_policy_;
-
-        // ---- assemble the first 45 entries exactly as before ----
-        // legacy layout: [base_omega(3), projected_gravity(3), cmd_vel(3),
-        //                joint_pos_rl(12), joint_vel_rl(12), last_action(12)] = 45
-        int off = 0;
-        current_obs_.segment(off, 3) = base_omega;              off += 3;
-        current_obs_.segment(off, 3) = projected_gravity;       off += 3;
-        current_obs_.segment(off, 3) = cmd_vel;                 off += 3;
-        current_obs_.segment(off, 12) = joint_pos_rl_;          off += 12;
-        current_obs_.segment(off, 12) = joint_vel_rl_;          off += 12;
-        current_obs_.segment(off, 12) = last_action_;           off += 12;
-
-        // ---- zero-fill the remaining (117 - 45) entries for now ----
-        if (off < obs_dim_) {
-            current_obs_.segment(off, obs_dim_ - off).setZero();
-        }
-    }
-
-    // Maintain the history ring and build the flat [1, total] tensor data
-    VecXf build_flat_input_() {
-        // push current frame to history
-        if (hist_n_ > 0) {
-            if ((int)history_.size() == hist_n_) history_.pop_front();
-            history_.push_back(current_obs_);
-        }
-
-        VecXf flat(input_dim_total_);
-        // current first
-        flat.segment(0, obs_dim_) = current_obs_;
-
-        int off = obs_dim_;
-        if (hist_n_ > 0) {
-            // NOTE: order must match training. We use oldest->newest here.
-            for (const auto& h : history_) {
-                flat.segment(off, obs_dim_) = h;
-                off += obs_dim_;
-            }
-        }
-        // pad zeros during warmup
-        if (off < input_dim_total_) {
-            flat.segment(off, input_dim_total_ - off).setZero();
-        }
-        return flat;
-    }
-
 public:
     explicit Lite3TestPolicyRunnerONNX(std::string policy_name)
-    : PolicyRunnerBase(policy_name)
-    , env_(ORT_LOGGING_LEVEL_WARNING, "ONNXPolicy")
-    , session_options_()
-    , session_(nullptr)
-    {
-        // Model path (same as your original)
-        model_path_ = GetAbsPath() + "/../policy/ppo/policy.onnx";
-        std::cout << "[ONNX INIT] Loading model: " << model_path_ << std::endl;
-
-        session_options_.SetIntraOpNumThreads(1);
-        session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-        session_ = Ort::Session(env_, model_path_.c_str(), session_options_);
-        std::cout << "[ONNX INIT] Model loaded successfully.\n";
-
-        // Discover IO + compute history length from model
-        discover_io_and_histlen_();
-
-        // Defaults
-        dof_pos_default_policy_.setZero(kActDim);
-        dof_pos_default_policy_ <<  0.0000, -0.8000, 1.6000,
-                                    0.0000, -0.8000, 1.6000,
-                                    0.0000, -0.8000, 1.6000,
-                                    0.0000, -0.8000, 1.6000;
-        dof_pos_default_robot_ = dof_pos_default_policy_;
-
-        kp_ = 30.f * VecXf::Ones(kActDim);
-        kd_ =  1.f * VecXf::Ones(kActDim);
-        max_cmd_vel_ << 0.8f, 0.8f, 0.8f;
-
-        joint_pos_rl_ = VecXf(kActDim);
-        joint_vel_rl_ = VecXf(kActDim);
-        tmp_action_   = VecXf(kActDim);
-        action_       = VecXf(kActDim);
-        last_action_  = VecXf::Zero(kActDim);
-
-        ra_.goal_joint_pos = VecXf::Zero(kActDim);
-        ra_.goal_joint_vel = VecXf::Zero(kActDim);
-        ra_.tau_ff         = VecXf::Zero(kActDim);
-        ra_.kp = kp_;
-        ra_.kd = kd_;
-
-        robot2policy_idx_ = generate_permutation(robot_order_, policy_order_);
-        policy2robot_idx_ = generate_permutation(policy_order_, robot_order_);
-        for (int i = 0; i < kActDim; ++i) {
-            std::cout << "robot2policy_idx[" << i << "]: " << robot2policy_idx_[i] << std::endl;
-            std::cout << "policy2robot_idx[" << i << "]: " << policy2robot_idx_[i] << std::endl;
-        }
-
-        // lightweight smoke test: feed zeros (correct total length)
-        {
-            VecXf dummy = VecXf::Zero(input_dim_total_);
-            std::array<int64_t,2> shape{1, input_dim_total_};
-            Ort::Value in = Ort::Value::CreateTensor<float>(
-                memory_info_, dummy.data(), input_dim_total_, shape.data(), shape.size());
-            const char* in_names[]  = { input_name_.c_str() };
-            const char* out_names[] = { output_name_.c_str() };
-            auto outs = session_.Run(Ort::RunOptions{nullptr}, in_names, &in, 1, out_names, 1);
-            (void)outs;
-            std::cout << policy_name_ << " ONNX policy network test success\n";
-        }
-
-        decimation_ = 12;
+        : PolicyRunnerBase(std::move(policy_name)),
+          env_(ORT_LOGGING_LEVEL_WARNING, "Lite3Policy"),
+          session_options_(),
+          memory_info_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {
+        InitSession();
+        InitRobotConstants();
     }
 
-    ~Lite3TestPolicyRunnerONNX() {}
+    ~Lite3TestPolicyRunnerONNX() override = default;
 
     void DisplayPolicyInfo() override {
-        std::cout << "ONNX policy: " << policy_name_ << "\n";
-        std::cout << "path: " << model_path_ << "\n";
-        std::cout << "obs_dim(single): " << obs_dim_
-                  << ", hist_n: " << hist_n_
-                  << ", action_dim: " << act_dim_ << "\n";
+        std::cout << "ONNX policy: " << policy_name_ << "\n"
+                  << "path: " << model_path_ << "\n"
+                  << "obs_dim: " << kObsDim << ", act_dim: " << kActDim << "\n";
     }
 
     void OnEnter() override {
         run_cnt_ = 0;
-        history_.clear();
-        current_obs_.setZero(obs_dim_);
-        last_action_.setZero(act_dim_);
-        std::cout << "[ONNX ENTER] PolicyRunner entered: " << policy_name_ << std::endl;
+        current_obs_.setZero(kObsDim);
+        history_frames_.clear();
+        pos_hist_.clear();
+        vel_hist_.clear();
+        tgt_hist_.clear();
+        last_action_offset_.setZero(kActDim);
+        SeedHistoryWithZeros();
+        debug_dump_quota_ = ParseDebugQuota();
+        std::cout << "[ONNX ENTER] History cleared. PolicyRunner entered: "
+                  << policy_name_ << std::endl;
     }
 
     RobotAction GetRobotAction(const RobotBasicState& ro) override {
-        // 1) Build single-frame obs (117)
-        current_obs_.resize(obs_dim_);
-        build_current_obs_(ro);
+        // Build current 117-D observation frame (training order)
+        VecXf joint_pos_policy(kActDim);
+        VecXf joint_vel_policy(kActDim);
+        MapRobotStateToPolicyOrder(ro, joint_pos_policy, joint_vel_policy);
 
-        // 2) Build flat stacked input [1 × input_dim_total_]
-        VecXf flat = build_flat_input_();
+        Vec3f cmd = ro.cmd_vel_normlized;
+        SaturateVec3(cmd, -1.f, 1.f);
 
-        // 3) Run ONNX
-        std::array<int64_t,2> input_shape{1, input_dim_total_};
-        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            memory_info_, flat.data(), input_dim_total_, input_shape.data(), input_shape.size());
+        Vec3f base_rpy = ro.base_rpy;
+        Vec3f body_omega = ro.base_rot_mat.transpose() * ro.base_omega;
 
-        const char* in_names[]  = { input_name_.c_str() };
-        const char* out_names[] = { output_name_.c_str() };
+        UpdateWithinFrameHistories(joint_pos_policy, joint_vel_policy);
 
-        auto output_tensors = session_.Run(
-            Ort::RunOptions{nullptr}, in_names, &input_tensor, 1, out_names, 1);
+        BuildCurrentObservation(cmd, base_rpy, body_omega,
+                                joint_pos_policy, joint_vel_policy);
 
-        float* action_data = output_tensors[0].GetTensorMutableData<float>();
-        Eigen::Map<Eigen::MatrixXf> act_map(action_data, act_dim_, 1);
-        action_ = VecXf(act_map);
-        last_action_ = action_;
-
-        // 4) Map to robot order + scaling + PD references
-        for (int i = 0; i < act_dim_; ++i) {
-            tmp_action_(i) = action_(policy2robot_idx_[i]) * action_scale_robot_[i];
+        // Update 40×117 history buffer (HistoryWrapper behaviour)
+        history_frames_.push_back(current_obs_);
+        if (static_cast<int>(history_frames_.size()) > kHistoryLen) {
+            history_frames_.pop_front();
         }
-        tmp_action_ += dof_pos_default_robot_;
 
-        ra_.goal_joint_pos = tmp_action_;
-        ra_.goal_joint_vel = VecXf::Zero(act_dim_);
-        ra_.tau_ff         = VecXf::Zero(act_dim_);
+        // Flatten current obs + history for ONNX
+        VecXf input_flat(kTotalInputDim);
+        input_flat.segment(0, kObsDim) = current_obs_;
+        int offset = kObsDim;
+        for (const auto& frame : history_frames_) {
+            input_flat.segment(offset, kObsDim) = frame;
+            offset += kObsDim;
+        }
+
+        std::array<int64_t, 2> input_shape{1, kTotalInputDim};
+        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+            memory_info_, input_flat.data(), kTotalInputDim,
+            input_shape.data(), input_shape.size());
+
+        auto outputs = session_.Run(
+            Ort::RunOptions{nullptr},
+            input_names_.data(), &input_tensor, 1,
+            output_names_.data(), 1);
+
+        float* act_data = outputs[0].GetTensorMutableData<float>();
+        Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, 1>> act_map(act_data, kActDim);
+        action_raw_ = act_map;
+
+        VecXf policy_action_offset = action_raw_ * kTrainingActionScale;
+        last_action_offset_ = policy_action_offset;
+
+        VecXf robot_pd_target(kActDim);
+        for (int i = 0; i < kActDim; ++i) {
+            const int idx_policy = policy2robot_idx_[i];
+            robot_pd_target(i) = dof_pos_default_robot_(i)
+                               + policy_action_offset(idx_policy) * action_scale_robot_[i];
+        }
+
+        ra_.goal_joint_pos = robot_pd_target;
+        ra_.goal_joint_vel = VecXf::Zero(kActDim);
+        ra_.tau_ff         = VecXf::Zero(kActDim);
         ra_.kp             = kp_;
         ra_.kd             = kd_;
 
+        DumpDebugIfRequested(input_flat, action_raw_);
         ++run_cnt_;
         return ra_;
     }
+
+private:
+    static constexpr int   kObsDim        = 117;
+    static constexpr int   kHistoryLen    = 40;
+    static constexpr int   kTotalInputDim = kObsDim * (1 + kHistoryLen);
+    static constexpr int   kActDim        = 12;
+    static constexpr float kTrainingActionScale = 0.25f;
+    static constexpr float kDofVelScale   = 0.1f;
+
+    std::string       model_path_;
+    Ort::Env          env_;
+    Ort::SessionOptions session_options_;
+    Ort::Session      session_{nullptr};
+    Ort::MemoryInfo   memory_info_;
+    std::vector<const char*> input_names_;
+    std::vector<const char*> output_names_;
+
+    VecXf dof_pos_default_policy_;
+    VecXf dof_pos_default_robot_;
+    VecXf kp_;
+    VecXf kd_;
+    std::vector<int>  robot2policy_idx_;
+    std::vector<int>  policy2robot_idx_;
+    std::array<float, kActDim> action_scale_robot_{{
+        0.125f, 0.25f, 0.25f,
+        0.125f, 0.25f, 0.25f,
+        0.125f, 0.25f, 0.25f,
+        0.125f, 0.25f, 0.25f}};
+
+    VecXf current_obs_ = VecXf::Zero(kObsDim);
+    std::deque<VecXf> history_frames_;
+    std::deque<VecXf> pos_hist_;
+    std::deque<VecXf> vel_hist_;
+    std::deque<VecXf> tgt_hist_;
+
+    VecXf action_raw_ = VecXf::Zero(kActDim);
+    VecXf last_action_offset_ = VecXf::Zero(kActDim);
+
+    RobotAction ra_;
+    int debug_dump_quota_ = 0;
+
+    void InitSession() {
+        model_path_ = GetAbsPath() + "/../policy/ppo/policy.onnx";
+        session_options_.SetIntraOpNumThreads(1);
+        session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+        session_ = Ort::Session(env_, model_path_.c_str(), session_options_);
+        input_names_.push_back("obs");
+        output_names_.push_back("action");
+        decimation_ = 12;
+    }
+
+    void InitRobotConstants() {
+        dof_pos_default_policy_.resize(kActDim);
+        dof_pos_default_policy_ <<
+            0.0f, -0.2f, 0.1f,
+            0.0f, -0.2f, 0.1f,
+            0.0f, -1.0f, 1.8f,
+            0.0f, -1.0f, 1.8f;
+        dof_pos_default_robot_ = dof_pos_default_policy_;
+
+        kp_ = 20.f * VecXf::Ones(kActDim);
+        kd_ =  0.7f * VecXf::Ones(kActDim);
+
+        const std::vector<std::string> order{
+            "FL_HipX_joint", "FL_HipY_joint", "FL_Knee_joint",
+            "FR_HipX_joint", "FR_HipY_joint", "FR_Knee_joint",
+            "HL_HipX_joint", "HL_HipY_joint", "HL_Knee_joint",
+            "HR_HipX_joint", "HR_HipY_joint", "HR_Knee_joint"};
+        robot2policy_idx_ = BuildPermutation(order, order);
+        policy2robot_idx_ = InvertPermutation(robot2policy_idx_);
+    }
+
+    static std::vector<int> BuildPermutation(const std::vector<std::string>& from,
+                                             const std::vector<std::string>& to) {
+        std::unordered_map<std::string, int> index;
+        for (int i = 0; i < static_cast<int>(from.size()); ++i) {
+            index[from[i]] = i;
+        }
+        std::vector<int> perm;
+        perm.reserve(to.size());
+        for (const auto& name : to) {
+            auto it = index.find(name);
+            perm.push_back(it != index.end() ? it->second : 0);
+        }
+        return perm;
+    }
+
+    static std::vector<int> InvertPermutation(const std::vector<int>& perm) {
+        std::vector<int> inv(perm.size(), 0);
+        for (int i = 0; i < static_cast<int>(perm.size()); ++i) {
+            int j = perm[i];
+            if (j >= 0 && j < static_cast<int>(perm.size())) {
+                inv[j] = i;
+            }
+        }
+        return inv;
+    }
+
+    void SeedHistoryWithZeros() {
+        VecXf zero = VecXf::Zero(kObsDim);
+        for (int i = 0; i < kHistoryLen; ++i) {
+            history_frames_.push_back(zero);
+        }
+    }
+
+    void SeedWithinFrameHistoriesWithCurrentJointState(const VecXf& joint_pos,
+                                                       const VecXf& joint_vel) {
+        pos_hist_.clear();
+        vel_hist_.clear();
+        tgt_hist_.clear();
+        for (int i = 0; i < 3; ++i) pos_hist_.push_back(joint_pos);
+        for (int i = 0; i < 2; ++i) vel_hist_.push_back(joint_vel);
+        VecXf init_target = joint_pos - dof_pos_default_policy_;
+        for (int i = 0; i < 2; ++i) tgt_hist_.push_back(init_target);
+        last_action_offset_ = init_target;
+    }
+
+    void UpdateWithinFrameHistories(const VecXf& joint_pos_policy,
+                                    const VecXf& joint_vel_policy) {
+        if (pos_hist_.empty()) {
+            SeedWithinFrameHistoriesWithCurrentJointState(joint_pos_policy, joint_vel_policy);
+        }
+
+        pos_hist_.push_back(joint_pos_policy);
+        if (static_cast<int>(pos_hist_.size()) > 3) pos_hist_.pop_front();
+
+        vel_hist_.push_back(joint_vel_policy);
+        if (static_cast<int>(vel_hist_.size()) > 2) vel_hist_.pop_front();
+
+        tgt_hist_.push_back(last_action_offset_);
+        if (static_cast<int>(tgt_hist_.size()) > 2) tgt_hist_.pop_front();
+    }
+
+    void MapRobotStateToPolicyOrder(const RobotBasicState& ro,
+                                    VecXf& joint_pos_policy,
+                                    VecXf& joint_vel_policy) const {
+        for (int i = 0; i < kActDim; ++i) {
+            const int idx = robot2policy_idx_[i];
+            joint_pos_policy(i) = ro.joint_pos(idx);
+            joint_vel_policy(i) = ro.joint_vel(idx) * kDofVelScale;
+        }
+    }
+
+    static void SaturateVec3(Vec3f& v, float low, float high) {
+        for (int i = 0; i < 3; ++i) {
+            v(i) = std::min(std::max(v(i), low), high);
+        }
+    }
+
+    void BuildCurrentObservation(const Vec3f& cmd,
+                                 const Vec3f& base_rpy,
+                                 const Vec3f& body_omega,
+                                 const VecXf& joint_pos_policy,
+                                 const VecXf& joint_vel_policy) {
+        VecXf pos_hist_flat = VecXf::Zero(36);
+        VecXf vel_hist_flat = VecXf::Zero(24);
+        VecXf tgt_hist_flat = VecXf::Zero(24);
+
+        int idx = 0;
+        for (const auto& v : pos_hist_) {
+            pos_hist_flat.segment(idx, kActDim) = v;
+            idx += kActDim;
+        }
+        idx = 0;
+        for (const auto& v : vel_hist_) {
+            vel_hist_flat.segment(idx, kActDim) = v;
+            idx += kActDim;
+        }
+        idx = 0;
+        for (const auto& v : tgt_hist_) {
+            tgt_hist_flat.segment(idx, kActDim) = v;
+            idx += kActDim;
+        }
+
+        current_obs_.head(3)        = cmd;
+        current_obs_.segment(3, 3)  = base_rpy;
+        current_obs_.segment(6, 3)  = body_omega;
+        current_obs_.segment(9, 12) = joint_pos_policy;
+        current_obs_.segment(21,12) = joint_vel_policy;
+        current_obs_.segment(33,36) = pos_hist_flat;
+        current_obs_.segment(69,24) = vel_hist_flat;
+        current_obs_.segment(93,24) = tgt_hist_flat;
+    }
+
+    int ParseDebugQuota() const {
+        const char* env = std::getenv("LITE3_DEBUG_DUMPS");
+        if (!env) return 0;
+        try {
+            return std::max(0, std::stoi(env));
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    void DumpDebugIfRequested(const VecXf& input_flat,
+                              const VecXf& policy_action_raw) {
+        if (debug_dump_quota_ <= 0) return;
+        const std::string fname = "debug_cpp_step" + std::to_string(run_cnt_) + ".txt";
+        std::ofstream ofs(fname);
+        if (!ofs.is_open()) {
+            std::cerr << "[DEBUG] Failed to open " << fname << " for writing\n";
+            return;
+        }
+        ofs << "obs_flat";
+        for (int i = 0; i < kTotalInputDim; ++i) {
+            ofs << " " << input_flat(i);
+        }
+        ofs << "\naction";
+        for (int i = 0; i < kActDim; ++i) {
+            ofs << " " << policy_action_raw(i);
+        }
+        ofs << std::endl;
+        --debug_dump_quota_;
+    }
 };
 
-#endif  // LITE3_TEST_POLICY_RUNNER_ONNX_HPP_
+#endif // LITE3_TEST_POLICY_RUNNER_ONNX_HPP_

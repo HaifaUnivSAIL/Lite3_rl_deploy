@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <functional>
 #include <termios.h>
+#include <atomic>
 
 #define AXIS_STEP 0.1
 
@@ -20,6 +21,7 @@ private:
     bool start_thread_flag_;
     std::thread kb_thread_;
     // std::mutex mtx_;  //  保护 usr_cmd_ 和 msfb_
+    std::atomic<bool> override_active_{false};
     
     void ClipNumber(float &num, float low, float up){
         if(low > up) std::cerr << "error clip" << std::endl;
@@ -62,6 +64,11 @@ public:
         msfb_ = msfb;
     }
 
+    virtual void SetUserCommand(const UserCommand& cmd) override {
+        usr_cmd_ = cmd;
+        override_active_.store(true);
+    }
+
 
     void Run(){
         struct termios oldt, newt;
@@ -83,6 +90,30 @@ public:
                 // std::lock_guard<std::mutex> lock(mtx_);  // 修改 usr_cmd_ 和读取 msfb_
 
                 std::cout << "input: " << input << std::endl;
+
+                if (override_active_.load()) {
+                    switch(msfb_.current_state) {
+                        case RobotMotionState::WaitingForStand:
+                            if(input=='z'){
+                                usr_cmd_.target_mode = int(RobotMotionState::StandingUp);
+                            }
+                        break;
+                        case RobotMotionState::StandingUp:
+                            if(input=='c'){
+                                usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                            }
+                        break;
+                        case RobotMotionState::RLControlMode:
+                            if(input=='r'){
+                                usr_cmd_.target_mode = int(RobotMotionState::JointDamping);
+                            }
+                        break;
+                        default:
+                            break;
+                    }
+                    continue;
+                }
+
                 if(input == 'r'){
                     usr_cmd_.target_mode = int(RobotMotionState::JointDamping);
                 }

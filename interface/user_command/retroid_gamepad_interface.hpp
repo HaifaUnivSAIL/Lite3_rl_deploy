@@ -4,6 +4,7 @@
 #include "retroid_gamepad.h"
 #include "user_command_interface.h"
 #include "custom_types.h"
+#include <atomic>
 
 using namespace interface;
 using namespace types;
@@ -16,6 +17,7 @@ private:
     bool transform_cmd_flag_ = true;
     std::thread transform_thread_;
     bool first_flag_ = true;
+    std::atomic<bool> override_active_{false};
 
     bool IsKeysEqual(const RetroidKeys& a, const RetroidKeys& b){
         if(a.value != b.value) return false;
@@ -41,6 +43,7 @@ public:
         transform_thread_.join();
     }
     virtual UserCommand GetUserCommand(){return usr_cmd_;}
+    virtual void SetUserCommand(const UserCommand& cmd) override { usr_cmd_ = cmd; override_active_.store(true); }
 
     void TransformRetroidToUserCommand();
     void SetMotionStateFeedback(const MotionStateFeedback& msfb){
@@ -74,9 +77,11 @@ void RetroidGamepadInterface::TransformRetroidToUserCommand(){
             first_flag_ = false;
             continue;
         }
-        usr_cmd_.forward_vel_scale = rt_keys_.left_axis_y;
-        usr_cmd_.side_vel_scale = -rt_keys_.left_axis_x;
-        usr_cmd_.turnning_vel_scale = -rt_keys_.right_axis_x;
+        if (!override_active_.load()) {
+            usr_cmd_.forward_vel_scale = rt_keys_.left_axis_y;
+            usr_cmd_.side_vel_scale = -rt_keys_.left_axis_x;
+            usr_cmd_.turnning_vel_scale = -rt_keys_.right_axis_x;
+        }
         if (!IsKeysEqual(rt_keys_, rt_keys_record_)) {
             switch (msfb_.current_state){
             case RobotMotionState::WaitingForStand:

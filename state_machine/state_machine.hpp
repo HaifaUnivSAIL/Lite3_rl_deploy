@@ -175,6 +175,17 @@ public:
         ri_ptr_->Start();
         std::cout << "Robot interface started" << std::endl;
         uc_ptr_->Start();
+        if (cp_ptr_ && cp_ptr_->enable_rl_command_override_) {
+            UserCommand preset{};
+            preset.forward_vel_scale = cp_ptr_->rl_command_override_(0);
+            preset.side_vel_scale    = cp_ptr_->rl_command_override_(1);
+            preset.turnning_vel_scale= cp_ptr_->rl_command_override_(2);
+            uc_ptr_->SetUserCommand(preset);
+            std::cout << "[StateMachine] Applied default RL command: "
+                      << preset.forward_vel_scale << ", "
+                      << preset.side_vel_scale << ", "
+                      << preset.turnning_vel_scale << std::endl;
+        }
         
         current_controller_->OnEnter();  
     }

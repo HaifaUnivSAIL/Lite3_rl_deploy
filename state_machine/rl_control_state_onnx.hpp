@@ -18,6 +18,9 @@
 #include "state_base.h"
 #include "policy_runner_base.hpp"
 #include "lite3_test_policy_runner_onnx.hpp"
+#include <Eigen/Geometry>
+#include <cmath>
+#include <cstdlib>
 
 
 
@@ -26,6 +29,9 @@ class RLControlStateONNX : public StateBase
 private:
     RobotBasicState rbs_;
     int state_run_cnt_;
+    Vec3f prev_base_rpy_ = Vec3f::Zero();
+    bool has_prev_orientation_ = false;
+    double prev_timestamp_sec_ = 0.0;
 
     std::shared_ptr<PolicyRunnerBase> policy_ptr_;
     std::shared_ptr<Lite3TestPolicyRunnerONNX> test_policy_;
@@ -38,10 +44,26 @@ private:
     float policy_cost_time_ = 1;
 
     void UpdateRobotObservation(){
+        const double current_ts = ri_ptr_->GetInterfaceTimeStamp();
         rbs_.base_rpy     = ri_ptr_->GetImuRpy();
         rbs_.base_rot_mat = RpyToRm(rbs_.base_rpy);
         rbs_.projected_gravity = RmToProjectedGravity(rbs_.base_rot_mat);
-        rbs_.base_omega   = ri_ptr_->GetImuOmega();
+        Vec3f imu_omega   = ri_ptr_->GetImuOmega();
+        if (has_prev_orientation_) {
+            const double dt = current_ts - prev_timestamp_sec_;
+            const float omega_max = imu_omega.cwiseAbs().maxCoeff();
+            if (omega_max < 1e-4f && dt > 1e-6) {
+                Mat3f R_prev = RpyToRm(prev_base_rpy_);
+                Mat3f delta  = R_prev.transpose() * rbs_.base_rot_mat;
+                Eigen::AngleAxisf aa(delta);
+                float angle = aa.angle();
+                if (!std::isnan(angle) && std::abs(angle) > 1e-8f) {
+                    Vec3f axis = aa.axis();
+                    imu_omega = axis * (angle / static_cast<float>(dt));
+                }
+            }
+        }
+        rbs_.base_omega   = imu_omega;
         rbs_.base_acc     = ri_ptr_->GetImuAcc();
         rbs_.joint_pos    = ri_ptr_->GetJointPosition();
         rbs_.joint_vel    = ri_ptr_->GetJointVelocity();
@@ -61,6 +83,9 @@ private:
         rbs_.cmd_vel_normlized = Vec3f(uc_ptr_->GetUserCommand().forward_vel_scale, 
                                     uc_ptr_->GetUserCommand().side_vel_scale, 
                                     uc_ptr_->GetUserCommand().turnning_vel_scale);
+        prev_base_rpy_ = rbs_.base_rpy;
+        prev_timestamp_sec_ = current_ts;
+        has_prev_orientation_ = true;
         
     }
 
@@ -125,6 +150,10 @@ public:
     }
 
     bool PostureUnsafeCheck(){
+        const char* disable = std::getenv("LITE3_DISABLE_POSTURE_CHECK");
+        if (disable && std::atoi(disable) != 0) {
+            return false;
+        }
         Vec3f rpy = ri_ptr_->GetImuRpy();
         if(fabs(rpy(0)) > 30./180*M_PI || fabs(rpy(1)) > 45./180*M_PI){
             std::cout << "posture value: " << 180./M_PI*rpy.transpose() << std::endl;
