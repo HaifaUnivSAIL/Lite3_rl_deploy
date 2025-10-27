@@ -20,8 +20,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -67,7 +69,6 @@ public:
         VecXf joint_pos_policy(kActDim);
         VecXf joint_vel_policy(kActDim);
         MapRobotStateToPolicyOrder(ro, joint_pos_policy, joint_vel_policy);
-
         Vec3f cmd = ro.cmd_vel_normlized;
         SaturateVec3(cmd, -1.f, 1.f);
 
@@ -78,6 +79,14 @@ public:
 
         BuildCurrentObservation(cmd, base_rpy, body_omega,
                                 joint_pos_policy, joint_vel_policy);
+
+        if (run_cnt_ == 0 && history_frames_.size() == kHistoryLen &&
+            std::all_of(history_frames_.begin(), history_frames_.end(),
+                        [](const VecXf& v){ return v.isZero(0); })) {
+            for (auto& frame : history_frames_) {
+                frame = current_obs_;
+            }
+        }
 
         // Update 40×117 history buffer (HistoryWrapper behaviour)
         history_frames_.push_back(current_obs_);
@@ -107,6 +116,7 @@ public:
         float* act_data = outputs[0].GetTensorMutableData<float>();
         Eigen::Map<Eigen::Matrix<float, Eigen::Dynamic, 1>> act_map(act_data, kActDim);
         action_raw_ = act_map;
+        action_raw_ = action_raw_.array().max(-kActionClip).min(kActionClip).matrix();
 
         VecXf policy_action_offset = action_raw_ * kTrainingActionScale;
         last_action_offset_ = policy_action_offset;
@@ -136,6 +146,7 @@ private:
     static constexpr int   kActDim        = 12;
     static constexpr float kTrainingActionScale = 0.25f;
     static constexpr float kDofVelScale   = 0.1f;
+    static constexpr float kActionClip    = 12.0f;
 
     std::string       model_path_;
     Ort::Env          env_;
@@ -325,7 +336,9 @@ private:
     void DumpDebugIfRequested(const VecXf& input_flat,
                               const VecXf& policy_action_raw) {
         if (debug_dump_quota_ <= 0) return;
-        const std::string fname = "debug_cpp_step" + std::to_string(run_cnt_) + ".txt";
+        const std::string dump_root = GetAbsPath() + "/../../Lite3_rl_training/debug_training_obs/";
+        std::filesystem::create_directories(dump_root);
+        const std::string fname = dump_root + "debug_cpp_step" + std::to_string(run_cnt_) + ".txt";
         std::ofstream ofs(fname);
         if (!ofs.is_open()) {
             std::cerr << "[DEBUG] Failed to open " << fname << " for writing\n";

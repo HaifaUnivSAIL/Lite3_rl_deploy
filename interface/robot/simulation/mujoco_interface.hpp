@@ -304,6 +304,12 @@ private:
         mj_forward(model_, data_);
         UpdateImu();
         UpdateJointState();
+        std::cout << "[MUJOCO RESET] base_pos "
+                  << default_base_pos_.transpose()
+                  << " base_quat "
+                  << default_base_quat_.transpose()
+                  << "\n[MUJOCO RESET] joint_pos " << joint_pos_.transpose()
+                  << "\n";
         run_time_ = 0.0;
         run_cnt_ = 0;
     }

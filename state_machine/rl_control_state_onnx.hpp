@@ -20,6 +20,7 @@
 #include "lite3_test_policy_runner_onnx.hpp"
 #include <Eigen/Geometry>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 
@@ -32,6 +33,9 @@ private:
     Vec3f prev_base_rpy_ = Vec3f::Zero();
     bool has_prev_orientation_ = false;
     double prev_timestamp_sec_ = 0.0;
+    Vec3f fixed_cmd_{0.f, 0.f, 0.f};
+    bool fixed_cmd_enabled_ = false;
+    bool printed_initial_obs_ = false;
 
     std::shared_ptr<PolicyRunnerBase> policy_ptr_;
     std::shared_ptr<Lite3TestPolicyRunnerONNX> test_policy_;
@@ -80,12 +84,27 @@ private:
         // }
         // cmd_vel+=vel_delta;           
         // rbs_.cmd_vel_normlized = cmd_vel;
-        rbs_.cmd_vel_normlized = Vec3f(uc_ptr_->GetUserCommand().forward_vel_scale, 
-                                    uc_ptr_->GetUserCommand().side_vel_scale, 
-                                    uc_ptr_->GetUserCommand().turnning_vel_scale);
+        if (!fixed_cmd_enabled_) {
+            ParseFixedCommandEnv();
+        }
+        if (fixed_cmd_enabled_) {
+            rbs_.cmd_vel_normlized = fixed_cmd_;
+        } else {
+            rbs_.cmd_vel_normlized = Vec3f(uc_ptr_->GetUserCommand().forward_vel_scale, 
+                                        uc_ptr_->GetUserCommand().side_vel_scale, 
+                                        uc_ptr_->GetUserCommand().turnning_vel_scale);
+        }
         prev_base_rpy_ = rbs_.base_rpy;
         prev_timestamp_sec_ = current_ts;
         has_prev_orientation_ = true;
+        if (!printed_initial_obs_) {
+            std::cout << "[RLControlStateONNX] Initial obs snapshot\n"
+                      << "  cmd: " << rbs_.cmd_vel_normlized.transpose() << "\n"
+                      << "  base_rpy: " << rbs_.base_rpy.transpose() << "\n"
+                      << "  joint_pos: " << rbs_.joint_pos.transpose() << "\n"
+                      << "  joint_vel: " << rbs_.joint_vel.transpose() << "\n";
+            printed_initial_obs_ = true;
+        }
         
     }
 
@@ -160,6 +179,20 @@ public:
             return true;
         }
         return false;
+    }
+
+    void ParseFixedCommandEnv() {
+        const char* env = std::getenv("LITE3_FIXED_CMD");
+        if (!env) {
+            return;
+        }
+        float x=0.f,y=0.f,z=0.f;
+        if (std::sscanf(env, "%f %f %f", &x, &y, &z) == 3) {
+            fixed_cmd_ << x, y, z;
+            fixed_cmd_enabled_ = true;
+            std::cout << "[RLControlStateONNX] Fixed command override "
+                      << "(" << fixed_cmd_(0) << ", " << fixed_cmd_(1) << ", " << fixed_cmd_(2) << ")\n";
+        }
     }
 
     virtual StateName GetNextStateName() {
