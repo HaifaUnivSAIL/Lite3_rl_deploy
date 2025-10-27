@@ -18,10 +18,12 @@
 #include "state_base.h"
 #include "policy_runner_base.hpp"
 #include "lite3_test_policy_runner_onnx.hpp"
+#include "../interface/robot/simulation/mujoco_interface.hpp"
 #include <Eigen/Geometry>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 
 
 
@@ -147,6 +149,9 @@ public:
         start_flag_ = true;
         run_policy_thread_ = std::thread(std::bind(&RLControlStateONNX::PolicyRunner, this));
         policy_ptr_->OnEnter();
+        if (auto mujoco_if = std::dynamic_pointer_cast<interface::MujocoInterface>(ri_ptr_)) {
+            mujoco_if->PrintFullState();
+        }
         StateBase::msfb_.UpdateCurrentState(RobotMotionState::RLControlMode);
         uc_ptr_->SetMotionStateFeedback(StateBase::msfb_);
     };

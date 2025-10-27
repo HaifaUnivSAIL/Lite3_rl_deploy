@@ -313,6 +313,22 @@ private:
         run_time_ = 0.0;
         run_cnt_ = 0;
     }
+
+public:
+    void PrintFullState() {
+        std::cout << "[MUJOCO STATE] base_pos " << Eigen::Map<Vec3d>(data_->qpos, 3).transpose()
+                  << "\n[MUJOCO STATE] base_quat "
+                  << Eigen::Map<Vec4d>(data_->qpos + 3, 4).transpose()
+                  << "\n[MUJOCO STATE] base_lin_vel "
+                  << Eigen::Map<Vec3d>(data_->qvel, 3).transpose()
+                  << "\n[MUJOCO STATE] base_ang_vel "
+                  << Eigen::Map<Vec3d>(data_->qvel + 3, 3).transpose()
+                  << "\n[MUJOCO STATE] joint_pos "
+                  << Eigen::Map<VecXd>(data_->qpos + 7, dof_num_).transpose()
+                  << "\n[MUJOCO STATE] joint_vel "
+                  << Eigen::Map<VecXd>(data_->qvel + 6, dof_num_).transpose()
+                  << "\n";
+    }
 };
 
 }  // namespace interface
