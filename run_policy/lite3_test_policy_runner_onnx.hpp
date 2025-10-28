@@ -163,10 +163,10 @@ private:
     std::vector<int>  robot2policy_idx_;
     std::vector<int>  policy2robot_idx_;
     std::array<float, kActDim> action_scale_robot_{{
-        0.125f, 0.25f, 0.25f,
-        0.125f, 0.25f, 0.25f,
-        0.125f, 0.25f, 0.25f,
-        0.125f, 0.25f, 0.25f}};
+        1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f,
+        1.0f, 1.0f, 1.0f}};
 
     VecXf current_obs_ = VecXf::Zero(kObsDim);
     std::deque<VecXf> history_frames_;
