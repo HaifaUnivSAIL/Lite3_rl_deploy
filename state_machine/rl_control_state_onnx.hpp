@@ -178,8 +178,25 @@ public:
         if (disable && std::atoi(disable) != 0) {
             return false;
         }
+        auto readLimit = [](const char* env_name, float default_deg) -> float {
+            const char* env_val = std::getenv(env_name);
+            if (!env_val) {
+                return default_deg;
+            }
+            char* endptr = nullptr;
+            float parsed = std::strtof(env_val, &endptr);
+            if (endptr == env_val || !std::isfinite(parsed) || parsed <= 0.f) {
+                return default_deg;
+            }
+            return parsed;
+        };
+        const float roll_limit_deg  = readLimit("LITE3_POSTURE_LIMIT_ROLL_DEG", 30.f);
+        const float pitch_limit_deg = readLimit("LITE3_POSTURE_LIMIT_PITCH_DEG", 45.f);
+        constexpr float safety_margin_deg = 0.5f;
+        const float roll_limit_rad  = (roll_limit_deg  + safety_margin_deg) * static_cast<float>(M_PI) / 180.f;
+        const float pitch_limit_rad = (pitch_limit_deg + safety_margin_deg) * static_cast<float>(M_PI) / 180.f;
         Vec3f rpy = ri_ptr_->GetImuRpy();
-        if(fabs(rpy(0)) > 30./180*M_PI || fabs(rpy(1)) > 45./180*M_PI){
+        if(fabs(rpy(0)) > roll_limit_rad || fabs(rpy(1)) > pitch_limit_rad){
             std::cout << "posture value: " << 180./M_PI*rpy.transpose() << std::endl;
             return true;
         }
