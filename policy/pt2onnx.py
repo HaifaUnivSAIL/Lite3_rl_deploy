@@ -245,8 +245,8 @@ if __name__ == "__main__":
     # ==== fill from your deploy config ====
     NUM_OBS     = 117          # current obs dim (no history)
     OBS_HIS_NUM = 40           # number of stacked past obs frames
-    CKPT_PATH   = "model_15000.pt"     # path to your PPO checkpoint
-    ONNX_OUT    = "policy_15000.onnx"  # output path
+    CKPT_PATH   = "model_7000.pt"     # path to your PPO checkpoint
+    ONNX_OUT    = "policy.onnx"  # output path
 
     export_actor_critic_to_onnx(
         ckpt_path=CKPT_PATH,

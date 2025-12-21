@@ -286,6 +286,20 @@ private:
     void ApplyInitialPose() {
         mj_resetData(model_, data_);
 
+        // Mimic training reset: randomize joint positions around defaults (0.5x–1.5x).
+        bool use_random_reset = true;
+        if (const char* env = std::getenv("LITE3_RANDOM_RESET")) {
+            // Set LITE3_RANDOM_RESET=0 to disable randomization.
+            use_random_reset = std::atoi(env) != 0;
+        }
+        Eigen::VectorXd init_joint = default_joint_pos_;
+        if (use_random_reset) {
+            std::uniform_real_distribution<double> dist(0.5, 1.5);
+            for (int i = 0; i < init_joint.size(); ++i) {
+                init_joint(i) *= dist(dre_);
+            }
+        }
+
         data_->qpos[0] = default_base_pos_(0);
         data_->qpos[1] = default_base_pos_(1);
         data_->qpos[2] = default_base_pos_(2);
@@ -295,7 +309,7 @@ private:
         data_->qpos[6] = default_base_quat_(3);
 
         for (int i = 0; i < dof_num_; ++i) {
-            data_->qpos[7 + i] = default_joint_pos_(i);
+            data_->qpos[7 + i] = init_joint(i);
         }
 
         std::fill_n(data_->qvel, model_->nv, 0.0);

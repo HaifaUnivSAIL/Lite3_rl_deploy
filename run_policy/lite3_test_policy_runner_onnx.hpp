@@ -80,15 +80,8 @@ public:
         BuildCurrentObservation(cmd, base_rpy, body_omega,
                                 joint_pos_policy, joint_vel_policy);
 
-        if (run_cnt_ == 0 && history_frames_.size() == kHistoryLen &&
-            std::all_of(history_frames_.begin(), history_frames_.end(),
-                        [](const VecXf& v){ return v.isZero(0); })) {
-            for (auto& frame : history_frames_) {
-                frame = current_obs_;
-            }
-        }
-
-        // Update 40×117 history buffer (HistoryWrapper behaviour)
+        // Update 40×117 history buffer (HistoryWrapper behaviour: oldest first).
+        // Start with zeroed frames (set in OnEnter), then push current obs and drop oldest.
         history_frames_.push_back(current_obs_);
         if (static_cast<int>(history_frames_.size()) > kHistoryLen) {
             history_frames_.pop_front();
@@ -187,16 +180,18 @@ private:
         session_ = Ort::Session(env_, model_path_.c_str(), session_options_);
         input_names_.push_back("obs");
         output_names_.push_back("action");
-        decimation_ = 12;
+        // Match training control.decimation (TwoLegStandCfg.control.decimation = 4)
+        decimation_ = 4;
     }
 
     void InitRobotConstants() {
+        // Match the training default_joint_angles used in TwoLegStandCfg.
         dof_pos_default_policy_.resize(kActDim);
         dof_pos_default_policy_ <<
-            0.0f, -0.2f, 0.1f,
-            0.0f, -0.2f, 0.1f,
-            0.0f, -1.0f, 1.8f,
-            0.0f, -1.0f, 1.8f;
+            -0.0154048f, -0.76697f,  1.53761f,   // FL_HipX, FL_HipY, FL_Knee
+             0.0159887f, -0.768286f, 1.53636f,   // FR_HipX, FR_HipY, FR_Knee
+            -0.0221317f, -0.765865f, 1.54788f,   // HL_HipX, HL_HipY, HL_Knee
+             0.0224431f, -0.767203f, 1.54679f;   // HR_HipX, HR_HipY, HR_Knee
         dof_pos_default_robot_ = dof_pos_default_policy_;
 
         kp_ = 20.f * VecXf::Ones(kActDim);

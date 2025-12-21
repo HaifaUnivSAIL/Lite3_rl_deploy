@@ -35,8 +35,8 @@ private:
     Vec3f prev_base_rpy_ = Vec3f::Zero();
     bool has_prev_orientation_ = false;
     double prev_timestamp_sec_ = 0.0;
-    Vec3f fixed_cmd_{0.f, 0.f, 0.f};
-    bool fixed_cmd_enabled_ = false;
+    Vec3f fixed_cmd_{0.8f, 0.f, 0.f}; // mirror training's fixed command by default
+    bool fixed_cmd_enabled_ = true;
     bool printed_initial_obs_ = false;
 
     std::shared_ptr<PolicyRunnerBase> policy_ptr_;
@@ -205,7 +205,10 @@ public:
 
     void ParseFixedCommandEnv() {
         const char* env = std::getenv("LITE3_FIXED_CMD");
-        if (!env) {
+        if (!env) return;
+        // Special values to disable the fixed command
+        if (std::strcmp(env, "disable") == 0 || std::strcmp(env, "none") == 0) {
+            fixed_cmd_enabled_ = false;
             return;
         }
         float x=0.f,y=0.f,z=0.f;
