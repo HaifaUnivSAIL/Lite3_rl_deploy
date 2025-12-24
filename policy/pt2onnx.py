@@ -2,6 +2,7 @@
 
 import os, sys
 from pathlib import Path
+import argparse
 import torch
 import onnx
 import onnxruntime as ort
@@ -242,16 +243,18 @@ def export_actor_critic_to_onnx(
 
 
 if __name__ == "__main__":
-    # ==== fill from your deploy config ====
-    NUM_OBS     = 117          # current obs dim (no history)
-    OBS_HIS_NUM = 40           # number of stacked past obs frames
-    CKPT_PATH   = "model_7000.pt"     # path to your PPO checkpoint
-    ONNX_OUT    = "policy.onnx"  # output path
+    parser = argparse.ArgumentParser(description="Export Lite3 ActorCritic checkpoint (.pt) to deploy-ready ONNX.")
+    parser.add_argument("--ckpt", default="model_7000.pt", help="Path to the PPO checkpoint (.pt).")
+    parser.add_argument("--out", default="policy.onnx", help="Output ONNX file path.")
+    parser.add_argument("--num-obs", type=int, default=117, help="Single-frame observation dimension.")
+    parser.add_argument("--history-len", type=int, default=40, help="Number of observation-history frames.")
+    parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
+    args = parser.parse_args()
 
     export_actor_critic_to_onnx(
-        ckpt_path=CKPT_PATH,
-        onnx_out=ONNX_OUT,
-        num_obs=NUM_OBS,
-        obs_his_num=OBS_HIS_NUM,
-        opset=17,
+        ckpt_path=args.ckpt,
+        onnx_out=args.out,
+        num_obs=args.num_obs,
+        obs_his_num=args.history_len,
+        opset=args.opset,
     )

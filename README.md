@@ -104,11 +104,34 @@ python3 -c 'import torch, numpy, onnx, onnxruntime; print(" All modules OK")'
 然后运行程序
 
 ```bash
-cd your/path/to/LITE3_RL_DEPOLY/policy/
+cd Lite3_rl_deploy/policy/
 
-python pt2onnx.py
+# 导出 checkpoint -> ONNX（two-leg stand: 117 维观测 + 40 帧历史）
+python pt2onnx.py \
+  --ckpt /path/to/model_7000.pt \
+  --out ppo/policy.onnx \
+  --num-obs 117 \
+  --history-len 40
 ```
-就可以在当前文件夹看到对应的.onnx模型文件了
+生成后，默认会被部署程序从 `Lite3_rl_deploy/policy/ppo/policy.onnx` 加载。
+
+可选：通过环境变量 `LITE3_POLICY_ONNX` 覆盖模型路径（绝对路径，或相对 `Lite3_rl_deploy/build` 的路径），无需重新编译。
+
+### 一致性对齐（训练 vs 部署）
+
+对比训练端与部署端的 obs/action，可使用 `Lite3_rl_training/debug_training_obs` 下的 dump 与脚本：
+
+```bash
+# 训练端（会在前 10 步输出 step_00.npz ... 到 Lite3_rl_training/debug_training_obs）
+python Lite3_rl_training/legged_gym/legged_gym/scripts/play.py --task lite3_two_leg_stand --load_run <run_name>
+
+# 部署端（输出 debug_cpp_step0.txt ... 到 Lite3_rl_training/debug_training_obs）
+export LITE3_DEBUG_DUMPS=10
+./Lite3_rl_deploy/build/rl_deploy
+
+# 对比
+python Lite3_rl_training/debug_training_obs/compare_blocks.py --root Lite3_rl_training/debug_training_obs --steps 10
+```
 
 
 ## 各模块介绍
@@ -134,6 +157,8 @@ state_machine模块是Lite3在不同的状态之间来回切换，不同的状�
 3.RL RL控制状态，表示机器狗执行策略输出的action
 
 4.JointDamping 关节阻尼状态，表示机器狗的关节处于阻尼控制状态
+
+注：`RL -> JointDamping` 也可能由姿态安全保护触发（roll/pitch 超限）。可用 `LITE3_DISABLE_POSTURE_CHECK=1` 禁用，或通过 `LITE3_POSTURE_LIMIT_ROLL_DEG` / `LITE3_POSTURE_LIMIT_PITCH_DEG` 调整阈值。
 
 ### interface
 

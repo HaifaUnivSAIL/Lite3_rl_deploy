@@ -73,12 +73,18 @@ public:
         SaturateVec3(cmd, -1.f, 1.f);
 
         Vec3f base_rpy = ro.base_rpy;
-        Vec3f body_omega = ro.base_rot_mat.transpose() * ro.base_omega;
+        // Training uses base-frame angular velocity (quat_rotate_inverse).
+        // Interfaces already provide body-frame IMU omega, so do NOT rotate again.
+        Vec3f body_omega = ro.base_omega;
 
-        UpdateWithinFrameHistories(joint_pos_policy, joint_vel_policy);
+        if (pos_hist_.empty()) {
+            SeedWithinFrameHistoriesWithCurrentJointState(joint_pos_policy, joint_vel_policy);
+        }
 
         BuildCurrentObservation(cmd, base_rpy, body_omega,
                                 joint_pos_policy, joint_vel_policy);
+        // Match training: observations are clipped before being fed into HistoryWrapper/policy.
+        current_obs_ = current_obs_.array().max(-kObsClip).min(kObsClip).matrix();
 
         // Update 40×117 history buffer (HistoryWrapper behaviour: oldest first).
         // Start with zeroed frames (set in OnEnter), then push current obs and drop oldest.
@@ -128,6 +134,8 @@ public:
         ra_.kd             = kd_;
 
         DumpDebugIfRequested(input_flat, action_raw_);
+        // Match training buffers: shift histories AFTER producing the current observation/action.
+        UpdateWithinFrameHistories(joint_pos_policy, joint_vel_policy);
         ++run_cnt_;
         return ra_;
     }
@@ -140,6 +148,7 @@ private:
     static constexpr float kTrainingActionScale = 0.25f;
     static constexpr float kDofVelScale   = 0.1f;
     static constexpr float kActionClip    = 12.0f;
+    static constexpr float kObsClip       = 100.0f;
 
     std::string       model_path_;
     Ort::Env          env_;
@@ -174,7 +183,16 @@ private:
     int debug_dump_quota_ = 0;
 
     void InitSession() {
-        model_path_ = GetAbsPath() + "/../policy/ppo/policy.onnx";
+        // Allow overriding model path without recompiling.
+        // - Absolute path: used as-is
+        // - Relative path: resolved relative to current working directory (typically build/)
+        const char* env_model = std::getenv("LITE3_POLICY_ONNX");
+        if (env_model && *env_model != '\0') {
+            std::filesystem::path p(env_model);
+            model_path_ = p.is_absolute() ? p.string() : (std::filesystem::path(GetAbsPath()) / p).string();
+        } else {
+            model_path_ = GetAbsPath() + "/../policy/ppo/policy.onnx";
+        }
         session_options_.SetIntraOpNumThreads(1);
         session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
         session_ = Ort::Session(env_, model_path_.c_str(), session_options_);

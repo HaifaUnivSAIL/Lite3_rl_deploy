@@ -21,10 +21,14 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 
 
 #include <atomic>
 #include <mutex>
+
+#include "json.hpp"
 
 namespace interface {
 
@@ -72,12 +76,14 @@ public:
         joint_cmd_ = MatXf::Zero(dof_num_, 5);
         default_joint_pos_.resize(dof_num_);
         default_joint_pos_ <<
-            0.0, -0.2, 0.1,
-            0.0, -0.2, 0.1,
-            0.0, -1.0, 1.8,
-            0.0, -1.0, 1.8;
+            // Match TwoLegStandCfg.init_state.default_joint_angles (training).
+            -0.0154048, -0.76697,   1.53761,
+             0.0159887, -0.768286,  1.53636,
+            -0.0221317, -0.765865,  1.54788,
+             0.0224431, -0.767203,  1.54679;
         default_base_pos_ << 0.0, 0.0, 0.32;
-        default_base_quat_ << 1.0, 0.0, 0.0, 0.0;
+        // MuJoCo quaternion order: (w, x, y, z). Training uses (x, y, z, w).
+        default_base_quat_ << 0.9999929146412841, -0.00023085526184233324, -0.0032073138974974646, -0.0019571690372445424;
 
         
 
@@ -286,6 +292,91 @@ private:
     void ApplyInitialPose() {
         mj_resetData(model_, data_);
 
+        // If provided, prefer a deterministic training snapshot (used to reproduce obs/action diffs).
+        // JSON format matches `Lite3_rl_training/legged_gym/legged_gym/envs/base/deploy_snapshot.json`.
+        const char* deploy_state = std::getenv("LITE3_DEPLOY_STATE");
+        if (deploy_state && std::filesystem::exists(deploy_state)) {
+            try {
+                std::ifstream ifs(deploy_state);
+                nlohmann::json j;
+                ifs >> j;
+
+                auto read_vec = [&](const char* key, int n) -> std::vector<double> {
+                    if (!j.contains(key) || !j[key].is_array() || static_cast<int>(j[key].size()) != n) {
+                        return {};
+                    }
+                    std::vector<double> out;
+                    out.reserve(n);
+                    for (int i = 0; i < n; ++i) out.push_back(j[key][i].get<double>());
+                    return out;
+                };
+
+                const auto base_pos = read_vec("base_pos", 3);
+                const auto base_quat_xyzw = read_vec("base_quat", 4);
+                const auto base_lin_vel = read_vec("base_lin_vel", 3);
+                const auto base_ang_vel = read_vec("base_ang_vel", 3);
+                const auto joint_pos = read_vec("joint_pos", dof_num_);
+                const auto joint_vel = read_vec("joint_vel", dof_num_);
+
+                if (base_pos.size() == 3) {
+                    data_->qpos[0] = base_pos[0];
+                    data_->qpos[1] = base_pos[1];
+                    data_->qpos[2] = base_pos[2];
+                }
+                if (base_quat_xyzw.size() == 4) {
+                    // Convert XYZW -> WXYZ for MuJoCo.
+                    data_->qpos[3] = base_quat_xyzw[3];
+                    data_->qpos[4] = base_quat_xyzw[0];
+                    data_->qpos[5] = base_quat_xyzw[1];
+                    data_->qpos[6] = base_quat_xyzw[2];
+                } else {
+                    data_->qpos[3] = default_base_quat_(0);
+                    data_->qpos[4] = default_base_quat_(1);
+                    data_->qpos[5] = default_base_quat_(2);
+                    data_->qpos[6] = default_base_quat_(3);
+                }
+
+                if (joint_pos.size() == static_cast<size_t>(dof_num_)) {
+                    for (int i = 0; i < dof_num_; ++i) {
+                        data_->qpos[7 + i] = joint_pos[i];
+                    }
+                } else {
+                    for (int i = 0; i < dof_num_; ++i) {
+                        data_->qpos[7 + i] = default_joint_pos_(i);
+                    }
+                }
+
+                std::fill_n(data_->qvel, model_->nv, 0.0);
+                if (base_lin_vel.size() == 3) {
+                    data_->qvel[0] = base_lin_vel[0];
+                    data_->qvel[1] = base_lin_vel[1];
+                    data_->qvel[2] = base_lin_vel[2];
+                }
+                if (base_ang_vel.size() == 3) {
+                    data_->qvel[3] = base_ang_vel[0];
+                    data_->qvel[4] = base_ang_vel[1];
+                    data_->qvel[5] = base_ang_vel[2];
+                }
+                if (joint_vel.size() == static_cast<size_t>(dof_num_)) {
+                    for (int i = 0; i < dof_num_; ++i) {
+                        data_->qvel[6 + i] = joint_vel[i];
+                    }
+                }
+
+                std::fill_n(data_->ctrl, model_->nu, 0.0);
+                mj_forward(model_, data_);
+                UpdateImu();
+                UpdateJointState();
+                std::cout << "[MUJOCO RESET] Loaded LITE3_DEPLOY_STATE=" << deploy_state << "\n";
+                run_time_ = 0.0;
+                run_cnt_ = 0;
+                return;
+            } catch (const std::exception& e) {
+                std::cerr << "[MUJOCO RESET] Failed to parse LITE3_DEPLOY_STATE (" << deploy_state
+                          << "): " << e.what() << "\n";
+            }
+        }
+
         // Mimic training reset: randomize joint positions around defaults (0.5x–1.5x).
         bool use_random_reset = true;
         if (const char* env = std::getenv("LITE3_RANDOM_RESET")) {
@@ -313,6 +404,13 @@ private:
         }
 
         std::fill_n(data_->qvel, model_->nv, 0.0);
+        if (use_random_reset) {
+            // Match training reset: base velocities uniform(-0.5, 0.5).
+            std::uniform_real_distribution<double> vdist(-0.5, 0.5);
+            for (int i = 0; i < 6 && i < model_->nv; ++i) {
+                data_->qvel[i] = vdist(dre_);
+            }
+        }
         std::fill_n(data_->ctrl, model_->nu, 0.0);
 
         mj_forward(model_, data_);

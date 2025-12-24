@@ -22,7 +22,14 @@ DT = 0.001
 RENDER_INTERVAL = 10
 
 URDF_INIT = {
-    "lite3": np.array([0, -1.35453, 2.54948] * 4, dtype=np.float32)
+    # Match TwoLegStandCfg.init_state.default_joint_angles (training).
+    # Order: FL_HipX, FL_HipY, FL_Knee, FR_HipX, FR_HipY, FR_Knee, HL_HipX, HL_HipY, HL_Knee, HR_HipX, HR_HipY, HR_Knee
+    "lite3": np.array([
+        -0.0154048, -0.76697,   1.53761,
+         0.0159887, -0.768286,  1.53636,
+        -0.0221317, -0.765865,  1.54788,
+         0.0224431, -0.767203,  1.54679,
+    ], dtype=np.float32)
 }
 
 class MuJoCoSimulation:
@@ -77,10 +84,47 @@ class MuJoCoSimulation:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
     def _set_initial_pose(self, key: str):
-        """Set joint positions to match PyBullet initial angles."""
+        """Set initial pose (optionally from LITE3_DEPLOY_STATE JSON)."""
         qpos0 = self.data.qpos.copy()
-        qpos0[7:7+self.dof_num] = URDF_INIT[key]
+        qvel0 = self.data.qvel.copy()
+
+        # Default: match training init pose (original_init.json).
+        base_pos = np.array([0.0, 0.0, 0.32], dtype=np.float64)
+        base_quat_xyzw = np.array(
+            [-0.00023085526184233324, -0.0032073138974974646, -0.0019571690372445424, 0.9999929146412841],
+            dtype=np.float64,
+        )
+        joint_pos = URDF_INIT[key].astype(np.float64)
+        base_lin_vel = np.zeros(3, dtype=np.float64)
+        base_ang_vel = np.zeros(3, dtype=np.float64)
+        joint_vel = np.zeros(self.dof_num, dtype=np.float64)
+
+        state_path = os.environ.get("LITE3_DEPLOY_STATE")
+        if state_path and os.path.isfile(state_path):
+            import json
+            with open(state_path, "r") as f:
+                state = json.load(f)
+            base_pos = np.asarray(state.get("base_pos", base_pos), dtype=np.float64)
+            base_quat_xyzw = np.asarray(state.get("base_quat", base_quat_xyzw), dtype=np.float64)
+            joint_pos = np.asarray(state.get("joint_pos", joint_pos), dtype=np.float64)
+            base_lin_vel = np.asarray(state.get("base_lin_vel", base_lin_vel), dtype=np.float64)
+            base_ang_vel = np.asarray(state.get("base_ang_vel", base_ang_vel), dtype=np.float64)
+            joint_vel = np.asarray(state.get("joint_vel", joint_vel), dtype=np.float64)
+            print(f"[INFO] Loaded reset state from LITE3_DEPLOY_STATE={state_path}")
+
+        # MuJoCo uses quaternion order (w, x, y, z) in qpos.
+        base_quat_wxyz = base_quat_xyzw[[3, 0, 1, 2]]
+
+        qpos0[0:3] = base_pos[:3]
+        qpos0[3:7] = base_quat_wxyz[:4]
+        qpos0[7:7 + self.dof_num] = joint_pos[:self.dof_num]
+
+        qvel0[0:3] = base_lin_vel[:3]
+        qvel0[3:6] = base_ang_vel[:3]
+        qvel0[6:6 + self.dof_num] = joint_vel[:self.dof_num]
+
         self.data.qpos[:] = qpos0
+        self.data.qvel[:] = qvel0
         mujoco.mj_forward(self.model, self.data)
 
     def print_debug_info(self):

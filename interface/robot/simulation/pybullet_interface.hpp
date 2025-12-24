@@ -130,9 +130,13 @@ namespace interface{
 
             // 接收数据
             char buffer[1024]={0};
-            float data[47]={0};
             struct sockaddr_in clientAddr;
             socklen_t clientAddrLen = sizeof(clientAddr);
+
+            constexpr int kImuFloatCount = 3 /*rpy*/ + 3 /*acc*/ + 3 /*omega*/;
+            constexpr int kJointFloatCount = 12 /*q*/ + 12 /*dq*/ + 12 /*tau*/;
+            constexpr int kTotalFloatCount = kImuFloatCount + kJointFloatCount;
+            constexpr int kExpectedBytes = sizeof(double) + kTotalFloatCount * sizeof(float);
 
             while(start_thread_flag_){
                 fds = epoll_wait(efd, evptr, 1, -1);    //阻塞监听，直到有事件发生
@@ -149,15 +153,22 @@ namespace interface{
                     std::cerr << "Error receiving data" << std::endl;
                     return;
                 }
+                if (recvLen < kExpectedBytes) {
+                    std::cerr << "Error receiving data: expected " << kExpectedBytes
+                              << " bytes, got " << recvLen << std::endl;
+                    continue;
+                }
 
-                std::memcpy(data, buffer, 46*sizeof(float));
-                run_time_ = ((double*)(data))[0];
-                rpy_ = Eigen::Map<Vec3f>(data+2, 3); 
-                acc_ = Eigen::Map<Vec3f>(data+5, 3); 
-                omega_body_ = Eigen::Map<Vec3f>(data+8, 3); 
-                joint_pos_ = Eigen::Map<VecXf>(data+11, 12); 
-                joint_vel_ = Eigen::Map<VecXf>(data+23, 12); 
-                joint_tau_ = Eigen::Map<VecXf>(data+35, 12); 
+                double ts = 0.0;
+                std::memcpy(&ts, buffer, sizeof(double));
+                run_time_ = ts;
+                const float* fdata = reinterpret_cast<const float*>(buffer + sizeof(double));
+                rpy_        = Eigen::Map<const Vec3f>(fdata + 0, 3);
+                acc_        = Eigen::Map<const Vec3f>(fdata + 3, 3);
+                omega_body_ = Eigen::Map<const Vec3f>(fdata + 6, 3);
+                joint_pos_  = Eigen::Map<const VecXf>(fdata + 9, 12);
+                joint_vel_  = Eigen::Map<const VecXf>(fdata + 21, 12);
+                joint_tau_  = Eigen::Map<const VecXf>(fdata + 33, 12);
 
                 // 打印接收到的数据
                 // std::cout << "Received data: " << run_time_ << std::endl;

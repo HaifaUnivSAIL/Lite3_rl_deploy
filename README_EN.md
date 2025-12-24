@@ -102,12 +102,35 @@ python3 -c 'import torch, numpy, onnx, onnxruntime; print(" All modules OK")'
 Then, run the program:
 
 ```bash
-cd your/path/to/LITE3_RL_DEPOLY/policy/
+cd Lite3_rl_deploy/policy/
 
-python pt2onnx.py
+# Export checkpoint -> ONNX (deploy expects 117 obs and 40 history frames for two-leg stand)
+python pt2onnx.py \
+  --ckpt /path/to/model_7000.pt \
+  --out ppo/policy.onnx \
+  --num-obs 117 \
+  --history-len 40
 ```
 
-Afterward, you will see the corresponding .onnx model file in the current folder.
+Afterward, the deploy binary will load `Lite3_rl_deploy/policy/ppo/policy.onnx` by default.
+
+Optional override (no rebuild): set `LITE3_POLICY_ONNX` to an absolute path, or a path relative to `Lite3_rl_deploy/build`.
+
+### Debug parity (training vs deploy)
+
+To compare observations/actions against the training stack, use the debug dumps under `Lite3_rl_training/debug_training_obs`:
+
+```bash
+# Training-side (writes step_00.npz, ... into Lite3_rl_training/debug_training_obs)
+python Lite3_rl_training/legged_gym/legged_gym/scripts/play.py --task lite3_two_leg_stand --load_run <run_name>
+
+# Deploy-side (writes debug_cpp_step0.txt, ... into Lite3_rl_training/debug_training_obs)
+export LITE3_DEBUG_DUMPS=10
+./Lite3_rl_deploy/build/rl_deploy
+
+# Compare
+python Lite3_rl_training/debug_training_obs/compare_blocks.py --root Lite3_rl_training/debug_training_obs --steps 10
+```
 
 ### state_machine
 
@@ -130,6 +153,9 @@ The state_machine module is where Lite3 switches between different states, the d
 3.RL : RL control state，indicating the action output by the robot execution strategy.
 
 4.JointDamping : Joint damping state, indicating that the joints of the robot are in the damping control state
+
+Note: the transition `RL -> JointDamping` can be triggered automatically by the posture safety guard (roll/pitch limits).
+You can disable it with `LITE3_DISABLE_POSTURE_CHECK=1`, or tune thresholds via `LITE3_POSTURE_LIMIT_ROLL_DEG` / `LITE3_POSTURE_LIMIT_PITCH_DEG`.
 
 ### interface
 
@@ -156,5 +182,3 @@ A(policy_runner_base) -->B(policy_runner)
 ```
 
 This section is used to execute the output of the RL policy, new policies can be implemented by inheriting policy_runner_base.
-
-

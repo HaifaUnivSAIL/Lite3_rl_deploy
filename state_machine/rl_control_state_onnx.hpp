@@ -23,7 +23,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <string>
 
 
 
@@ -37,6 +39,7 @@ private:
     double prev_timestamp_sec_ = 0.0;
     Vec3f fixed_cmd_{0.8f, 0.f, 0.f}; // mirror training's fixed command by default
     bool fixed_cmd_enabled_ = true;
+    std::string last_fixed_cmd_env_;
     bool printed_initial_obs_ = false;
 
     std::shared_ptr<PolicyRunnerBase> policy_ptr_;
@@ -86,9 +89,7 @@ private:
         // }
         // cmd_vel+=vel_delta;           
         // rbs_.cmd_vel_normlized = cmd_vel;
-        if (!fixed_cmd_enabled_) {
-            ParseFixedCommandEnv();
-        }
+        ParseFixedCommandEnv();
         if (fixed_cmd_enabled_) {
             rbs_.cmd_vel_normlized = fixed_cmd_;
         } else {
@@ -190,14 +191,17 @@ public:
             }
             return parsed;
         };
-        const float roll_limit_deg  = readLimit("LITE3_POSTURE_LIMIT_ROLL_DEG", 30.f);
-        const float pitch_limit_deg = readLimit("LITE3_POSTURE_LIMIT_PITCH_DEG", 45.f);
+        // Defaults tuned for the two-leg stand task (torso can intentionally reach large pitch).
+        const float roll_limit_deg  = readLimit("LITE3_POSTURE_LIMIT_ROLL_DEG", 40.f);
+        const float pitch_limit_deg = readLimit("LITE3_POSTURE_LIMIT_PITCH_DEG", 90.f);
         constexpr float safety_margin_deg = 0.5f;
         const float roll_limit_rad  = (roll_limit_deg  + safety_margin_deg) * static_cast<float>(M_PI) / 180.f;
         const float pitch_limit_rad = (pitch_limit_deg + safety_margin_deg) * static_cast<float>(M_PI) / 180.f;
         Vec3f rpy = ri_ptr_->GetImuRpy();
         if(fabs(rpy(0)) > roll_limit_rad || fabs(rpy(1)) > pitch_limit_rad){
-            std::cout << "posture value: " << 180./M_PI*rpy.transpose() << std::endl;
+            std::cout << "[RLControlStateONNX] posture unsafe (deg): " << 180./M_PI*rpy.transpose()
+                      << " | limits (deg): roll " << roll_limit_deg << " pitch " << pitch_limit_deg
+                      << " | set LITE3_POSTURE_LIMIT_* or LITE3_DISABLE_POSTURE_CHECK=1\n";
             return true;
         }
         return false;
@@ -206,9 +210,13 @@ public:
     void ParseFixedCommandEnv() {
         const char* env = std::getenv("LITE3_FIXED_CMD");
         if (!env) return;
+        // Avoid spamming stdout when running in a tight loop.
+        if (last_fixed_cmd_env_ == env) return;
+        last_fixed_cmd_env_ = env;
         // Special values to disable the fixed command
         if (std::strcmp(env, "disable") == 0 || std::strcmp(env, "none") == 0) {
             fixed_cmd_enabled_ = false;
+            std::cout << "[RLControlStateONNX] Fixed command disabled; using user commands.\n";
             return;
         }
         float x=0.f,y=0.f,z=0.f;
