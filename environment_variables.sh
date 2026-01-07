@@ -4,7 +4,7 @@
 #   source Lite3_rl_deploy/environment_variables.sh
 
 # Fixed command sent to the policy (lin_vel_x lin_vel_y ang_vel_yaw)
-export LITE3_FIXED_CMD="0.8 0 0"
+export LITE3_FIXED_CMD="0 0 0"
 
 # Optional: override which ONNX model the deploy binary loads.
 # - Absolute paths are used as-is.

@@ -133,6 +133,63 @@ def infer_arch_dims_from_state(state):
             enc_hidden, adapt_hidden, n_actions, actor_in_features, adapt_in)
 
 
+def _infer_torchscript_arity(ts_module):
+    try:
+        schema = ts_module.forward.schema
+        # Drop implicit self if present.
+        return max(0, len(schema.arguments) - 1)
+    except Exception:
+        return None
+
+
+class TorchscriptDeployPolicyObsHist(torch.nn.Module):
+    def __init__(self, ts_module, num_obs, num_obs_history):
+        super().__init__()
+        self.ts_module = ts_module
+        self.num_obs = num_obs
+        self.num_obs_history = num_obs_history
+
+    def forward(self, obs_flat: torch.Tensor):
+        obs_flat = obs_flat.clone().contiguous()
+        obs_flat = torch.reshape(obs_flat, (-1, self.num_obs + self.num_obs_history))
+        obs = obs_flat[:, : self.num_obs]
+        obs_hist = obs_flat[:, self.num_obs :]
+        return self.ts_module(obs, obs_hist)
+
+
+class TorchscriptDeployPolicyFlat(torch.nn.Module):
+    def __init__(self, ts_module, num_obs, num_obs_history):
+        super().__init__()
+        self.ts_module = ts_module
+        self.num_obs = num_obs
+        self.num_obs_history = num_obs_history
+
+    def forward(self, obs_flat: torch.Tensor):
+        obs_flat = obs_flat.clone().contiguous()
+        obs_flat = torch.reshape(obs_flat, (-1, self.num_obs + self.num_obs_history))
+        return self.ts_module(obs_flat)
+
+
+def _compare_with_flat_input(deploy, onnx_out: str, input_path: str, total_in: int):
+    import numpy as np
+
+    vals = np.array([float(x) for x in Path(input_path).read_text().split()], dtype=np.float32)
+    if vals.size != total_in:
+        raise ValueError(f"compare-input size mismatch: {vals.size} vs expected {total_in}")
+    inp = vals.reshape(1, -1)
+
+    with torch.no_grad():
+        torch_out = deploy(torch.from_numpy(inp)).cpu().numpy()
+
+    sess = ort.InferenceSession(onnx_out, providers=["CPUExecutionProvider"])
+    onnx_out_val = sess.run(["action"], {"obs": inp})[0]
+    diff = np.abs(torch_out - onnx_out_val)
+    print("COMPARE mean abs diff:", float(diff.mean()))
+    print("COMPARE max  abs diff:", float(diff.max()))
+    print("COMPARE torch head:", torch_out[0][:6].tolist())
+    print("COMPARE onnx  head:", onnx_out_val[0][:6].tolist())
+
+
 # ----------------------------
 # Export
 # ----------------------------
@@ -144,75 +201,93 @@ def export_actor_critic_to_onnx(
     obs_his_num: int,
     # opset & exporter settings
     opset: int = 17,
+    torchscript_path: str = None,
+    compare_input: str = None,
 ):
     device = torch.device("cpu")
 
-    # Load state dict
-    state = load_state_dict_any(ckpt_path, device=device)
+    if torchscript_path:
+        # Load TorchScript export from training (preferred when available).
+        ts_module = torch.jit.load(torchscript_path, map_location=device).eval()
+        num_obs_history = num_obs * obs_his_num
+        total_in = num_obs + num_obs_history
+        ts_arity = _infer_torchscript_arity(ts_module)
+        if ts_arity == 1:
+            deploy = TorchscriptDeployPolicyFlat(ts_module, num_obs, num_obs_history).to(device).eval()
+        elif ts_arity == 2:
+            deploy = TorchscriptDeployPolicyObsHist(ts_module, num_obs, num_obs_history).to(device).eval()
+        else:
+            raise ValueError(f"Unsupported TorchScript arity: {ts_arity}")
+        deploy = torch.jit.script(deploy)
+        dummy = torch.ones(1, total_in, dtype=torch.float32, device=device)
+        n_actions = deploy(dummy).shape[1]
+    else:
+        # Load state dict
+        state = load_state_dict_any(ckpt_path, device=device)
 
-    # Infer dims from checkpoint so load_state_dict(strict=True) passes
-    (n_priv, enc_lat, actor_hidden, critic_hidden,
-     enc_hidden, adapt_hidden, n_actions,
-     actor_in_features, adapt_in_features) = infer_arch_dims_from_state(state)
+        # Infer dims from checkpoint so load_state_dict(strict=True) passes
+        (n_priv, enc_lat, actor_hidden, critic_hidden,
+         enc_hidden, adapt_hidden, n_actions,
+         actor_in_features, adapt_in_features) = infer_arch_dims_from_state(state)
 
-    # Sanity: ensure our runtime num_obs aligns with actor input side
-    if actor_in_features != (num_obs + enc_lat):
-        raise ValueError(
-            f"Actor input mismatch: ckpt expects {actor_in_features} = num_obs({num_obs}) + enc_lat({enc_lat}). "
-            f"Check your num_obs or encoder_latent_dims."
-        )
+        # Sanity: ensure our runtime num_obs aligns with actor input side
+        if actor_in_features != (num_obs + enc_lat):
+            raise ValueError(
+                f"Actor input mismatch: ckpt expects {actor_in_features} = num_obs({num_obs}) + enc_lat({enc_lat}). "
+                f"Check your num_obs or encoder_latent_dims."
+            )
 
-    # Compute deploy input sizes
-    num_obs_history = num_obs * obs_his_num
-    total_in = num_obs + num_obs_history
+        # Compute deploy input sizes
+        num_obs_history = num_obs * obs_his_num
+        total_in = num_obs + num_obs_history
 
-    # Sanity: ensure history width matches checkpoint adaptation input
-    if adapt_in_features != num_obs_history:
-        raise ValueError(
-            f"History size mismatch: ckpt adaptation expects {adapt_in_features}, "
-            f"but num_obs_history computed as {num_obs_history} = {num_obs} * {obs_his_num}."
-        )
+        # Sanity: ensure history width matches checkpoint adaptation input
+        if adapt_in_features != num_obs_history:
+            raise ValueError(
+                f"History size mismatch: ckpt adaptation expects {adapt_in_features}, "
+                f"but num_obs_history computed as {num_obs_history} = {num_obs} * {obs_his_num}."
+            )
 
-    # Rebuild AC with EXACT training widths so we can strict-load
-    ac = ActorCritic(
-        num_obs=num_obs,
-        num_privileged_obs=n_priv,           # match ckpt (even if unused at deploy)
-        num_obs_history=num_obs_history,
-        num_actions=n_actions,
-        actor_hidden_dims=actor_hidden,      # e.g. [512,256,128]
-        critic_hidden_dims=critic_hidden,
-        encoder_hidden_dims=enc_hidden,      # e.g. [256,128]
-        adaptation_hidden_dims=adapt_hidden, # e.g. [256,32]
-        encoder_latent_dims=enc_lat,         # e.g. 18
-        activation="elu",
-    ).to(device).eval()
+        # Rebuild AC with EXACT training widths so we can strict-load
+        ac = ActorCritic(
+            num_obs=num_obs,
+            num_privileged_obs=n_priv,           # match ckpt (even if unused at deploy)
+            num_obs_history=num_obs_history,
+            num_actions=n_actions,
+            actor_hidden_dims=actor_hidden,      # e.g. [512,256,128]
+            critic_hidden_dims=critic_hidden,
+            encoder_hidden_dims=enc_hidden,      # e.g. [256,128]
+            adaptation_hidden_dims=adapt_hidden, # e.g. [256,32]
+            encoder_latent_dims=enc_lat,         # e.g. 18
+            activation="elu",
+        ).to(device).eval()
 
-    ac.load_state_dict(state, strict=True)
+        ac.load_state_dict(state, strict=True)
 
-    # Wrapper with ONNX-friendly splitting (no slicing views)
-    class DeployPolicy(torch.nn.Module):
-        def __init__(self, actor, adaptation_module, num_obs, num_obs_history):
-            super().__init__()
-            self.actor = actor
-            self.adaptation_module = adaptation_module
-            self.num_obs = num_obs
-            self.num_obs_history = num_obs_history
-            # Gather indices → ONNX "Gather"
-            self.register_buffer("idx_obs",  torch.arange(num_obs, dtype=torch.long), persistent=False)
-            self.register_buffer("idx_hist", torch.arange(num_obs, num_obs + num_obs_history, dtype=torch.long), persistent=False)
+        # Wrapper with ONNX-friendly splitting (no slicing views)
+        class DeployPolicy(torch.nn.Module):
+            def __init__(self, actor, adaptation_module, num_obs, num_obs_history):
+                super().__init__()
+                self.actor = actor
+                self.adaptation_module = adaptation_module
+                self.num_obs = num_obs
+                self.num_obs_history = num_obs_history
+                # Gather indices -> ONNX "Gather"
+                self.register_buffer("idx_obs",  torch.arange(num_obs, dtype=torch.long), persistent=False)
+                self.register_buffer("idx_hist", torch.arange(num_obs, num_obs + num_obs_history, dtype=torch.long), persistent=False)
 
-        def forward(self, obs_flat: torch.Tensor):
-            # 1) kill view/stride weirdness up front (maps to ONNX Identity)
-            obs_flat = obs_flat.clone().contiguous()
-            # 2) ensure a plain 2D shape (maps to ONNX Reshape)
-            obs_flat = torch.reshape(obs_flat, (-1, self.num_obs + self.num_obs_history))
-            # 3) ONNX-friendly splits (Gather)
-            obs      = obs_flat.index_select(1, self.idx_obs)    # [B, num_obs]
-            obs_hist = obs_flat.index_select(1, self.idx_hist)   # [B, num_obs_history]
-            latent   = self.adaptation_module(obs_hist)          # [B, enc_lat]
-            return self.actor(torch.cat((obs, latent), dim=1))   # [B, n_actions]
+            def forward(self, obs_flat: torch.Tensor):
+                # 1) kill view/stride weirdness up front (maps to ONNX Identity)
+                obs_flat = obs_flat.clone().contiguous()
+                # 2) ensure a plain 2D shape (maps to ONNX Reshape)
+                obs_flat = torch.reshape(obs_flat, (-1, self.num_obs + self.num_obs_history))
+                # 3) ONNX-friendly splits (Gather)
+                obs      = obs_flat.index_select(1, self.idx_obs)    # [B, num_obs]
+                obs_hist = obs_flat.index_select(1, self.idx_hist)   # [B, num_obs_history]
+                latent   = self.adaptation_module(obs_hist)          # [B, enc_lat]
+                return self.actor(torch.cat((obs, latent), dim=1))   # [B, n_actions]
 
-    deploy = DeployPolicy(ac.actor, ac.adaptation_module, num_obs, num_obs_history).to(device).eval()
+        deploy = DeployPolicy(ac.actor, ac.adaptation_module, num_obs, num_obs_history).to(device).eval()
 
     # Dummy input with exact static shape the runner uses
     dummy = torch.ones(1, total_in, dtype=torch.float32, device=device)
@@ -241,14 +316,19 @@ def export_actor_critic_to_onnx(
     assert out.shape == (1, n_actions), f"unexpected action shape {out.shape}"
     print("ONNX runtime smoke test OK, action shape:", out.shape)
 
+    if compare_input:
+        _compare_with_flat_input(deploy, onnx_out, compare_input, total_in)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Lite3 ActorCritic checkpoint (.pt) to deploy-ready ONNX.")
     parser.add_argument("--ckpt", default="model_7000.pt", help="Path to the PPO checkpoint (.pt).")
+    parser.add_argument("--torchscript", default=None, help="Path to TorchScript policy export (.pt).")
     parser.add_argument("--out", default="policy.onnx", help="Output ONNX file path.")
     parser.add_argument("--num-obs", type=int, default=117, help="Single-frame observation dimension.")
     parser.add_argument("--history-len", type=int, default=40, help="Number of observation-history frames.")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version.")
+    parser.add_argument("--compare-input", default=None, help="Path to flat input txt for PyTorch vs ONNX compare.")
     args = parser.parse_args()
 
     export_actor_critic_to_onnx(
@@ -257,4 +337,6 @@ if __name__ == "__main__":
         num_obs=args.num_obs,
         obs_his_num=args.history_len,
         opset=args.opset,
+        torchscript_path=args.torchscript,
+        compare_input=args.compare_input,
     )
