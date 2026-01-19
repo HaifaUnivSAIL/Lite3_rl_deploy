@@ -139,7 +139,12 @@ class MuJoCoSimulation:
         tau = self.input_tq.flatten()
         q_world = self.data.qpos[3:7]
         rpy = self.quaternion_to_euler(q_world)
-        angvel_b = self.data.qvel[3:6]
+        # MuJoCo free-joint angular velocity is in world frame; rotate to body frame for policy.
+        angvel_w = self.data.qvel[3:6]
+        mat = np.zeros(9, dtype=np.float64)
+        mujoco.mju_quat2Mat(mat, q_world.astype(np.float64))
+        R = mat.reshape(3, 3)
+        angvel_b = (R.T @ angvel_w.reshape(3, 1)).reshape(3,)
         mat = np.zeros(9, dtype=np.float64)
         mujoco.mju_quat2Mat(mat, q_world.astype(np.float64))
         R = mat.reshape(3, 3)

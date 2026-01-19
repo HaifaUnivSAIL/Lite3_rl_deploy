@@ -20,11 +20,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -198,6 +201,7 @@ private:
         session_ = Ort::Session(env_, model_path_.c_str(), session_options_);
         input_names_.push_back("obs");
         output_names_.push_back("action");
+        LogModelInfo();
         // Match training control.decimation (TwoLegStandCfg.control.decimation = 4)
         decimation_ = 4;
     }
@@ -343,6 +347,76 @@ private:
             return std::max(0, std::stoi(env));
         } catch (...) {
             return 0;
+        }
+    }
+
+    static uint64_t Fnv1a64File(const std::string& path, size_t* out_size) {
+        std::ifstream ifs(path, std::ios::binary);
+        if (!ifs.is_open()) {
+            if (out_size) *out_size = 0;
+            return 0;
+        }
+        const uint64_t kOffset = 14695981039346656037ULL;
+        const uint64_t kPrime = 1099511628211ULL;
+        uint64_t hash = kOffset;
+        size_t total = 0;
+        char buf[8192];
+        while (ifs.good()) {
+            ifs.read(buf, sizeof(buf));
+            std::streamsize n = ifs.gcount();
+            for (std::streamsize i = 0; i < n; ++i) {
+                hash ^= static_cast<unsigned char>(buf[i]);
+                hash *= kPrime;
+            }
+            total += static_cast<size_t>(n);
+        }
+        if (out_size) *out_size = total;
+        return hash;
+    }
+
+    static std::string ShapeToString(const std::vector<int64_t>& shape) {
+        std::ostringstream oss;
+        oss << "[";
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i) oss << ", ";
+            oss << shape[i];
+        }
+        oss << "]";
+        return oss.str();
+    }
+
+    void LogModelInfo() {
+        std::cout << "[ONNX] model path: " << model_path_ << "\n";
+        size_t fsize = 0;
+        const uint64_t hash = Fnv1a64File(model_path_, &fsize);
+        if (hash != 0) {
+            std::cout << "[ONNX] file size: " << fsize << " bytes\n";
+            std::cout << "[ONNX] fnv1a64: 0x" << std::hex << std::setw(16)
+                      << std::setfill('0') << hash << std::dec << "\n";
+        } else {
+            std::cout << "[ONNX] file hash unavailable (read failed)\n";
+        }
+
+        Ort::AllocatorWithDefaultOptions alloc;
+        const size_t num_inputs = session_.GetInputCount();
+        const size_t num_outputs = session_.GetOutputCount();
+        std::cout << "[ONNX] inputs: " << num_inputs << ", outputs: " << num_outputs << "\n";
+
+        for (size_t i = 0; i < num_inputs; ++i) {
+            auto name = session_.GetInputNameAllocated(i, alloc);
+            auto type_info = session_.GetInputTypeInfo(i);
+            auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+            auto shape = tensor_info.GetShape();
+            std::cout << "[ONNX] input[" << i << "] name=" << name.get()
+                      << " shape=" << ShapeToString(shape) << "\n";
+        }
+        for (size_t i = 0; i < num_outputs; ++i) {
+            auto name = session_.GetOutputNameAllocated(i, alloc);
+            auto type_info = session_.GetOutputTypeInfo(i);
+            auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+            auto shape = tensor_info.GetShape();
+            std::cout << "[ONNX] output[" << i << "] name=" << name.get()
+                      << " shape=" << ShapeToString(shape) << "\n";
         }
     }
 
