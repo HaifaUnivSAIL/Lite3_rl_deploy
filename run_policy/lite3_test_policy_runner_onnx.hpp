@@ -210,10 +210,10 @@ private:
         // Match the training default_joint_angles used in TwoLegStandCfg.
         dof_pos_default_policy_.resize(kActDim);
         dof_pos_default_policy_ <<
-            -0.0154048f, -0.76697f,  1.53761f,   // FL_HipX, FL_HipY, FL_Knee
-             0.0159887f, -0.768286f, 1.53636f,   // FR_HipX, FR_HipY, FR_Knee
-            -0.0221317f, -0.765865f, 1.54788f,   // HL_HipX, HL_HipY, HL_Knee
-             0.0224431f, -0.767203f, 1.54679f;   // HR_HipX, HR_HipY, HR_Knee
+            0.0f, -0.8f, 1.6f,   // FL_HipX, FL_HipY, FL_Knee
+            0.0f, -0.8f, 1.6f,   // FR_HipX, FR_HipY, FR_Knee
+            0.0f, -0.8f, 1.6f,   // HL_HipX, HL_HipY, HL_Knee
+            0.0f, -0.8f, 1.6f;   // HR_HipX, HR_HipY, HR_Knee
         dof_pos_default_robot_ = dof_pos_default_policy_;
 
         kp_ = 20.f * VecXf::Ones(kActDim);
