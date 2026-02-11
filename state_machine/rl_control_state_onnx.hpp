@@ -37,8 +37,8 @@ private:
     Vec3f prev_base_rpy_ = Vec3f::Zero();
     bool has_prev_orientation_ = false;
     double prev_timestamp_sec_ = 0.0;
-    Vec3f fixed_cmd_{0.8f, 0.f, 0.f}; // mirror training's fixed command by default
-    bool fixed_cmd_enabled_ = true;
+    Vec3f fixed_cmd_{0.f, 0.f, 0.f}; // training two-leg stand uses zero commands by default
+    bool fixed_cmd_enabled_ = false;
     std::string last_fixed_cmd_env_;
     bool printed_initial_obs_ = false;
 

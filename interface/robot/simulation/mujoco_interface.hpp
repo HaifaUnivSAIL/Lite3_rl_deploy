@@ -18,6 +18,7 @@
 #include <thread>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 #include <random>
 #include <algorithm>
 #include <cmath>
@@ -95,6 +96,24 @@ public:
             exit(1);
         }
         data_ = mj_makeData(model_);
+
+        // Allow overriding simulation timestep for deploy parity (training uses 0.005s).
+        if (const char* dt_env = std::getenv("LITE3_MUJOCO_DT")) {
+            char* endptr = nullptr;
+            const double parsed = std::strtod(dt_env, &endptr);
+            if (endptr != dt_env && std::isfinite(parsed) && parsed > 0.0) {
+                dt_ = parsed;
+            }
+        }
+        // Optional render interval override.
+        if (const char* render_env = std::getenv("LITE3_MUJOCO_RENDER_INTERVAL")) {
+            const int parsed = std::atoi(render_env);
+            if (parsed > 0) {
+                render_interval_ = parsed;
+            }
+        }
+        model_->opt.timestep = dt_;
+        std::cout << "[MuJoCoInterface] dt=" << dt_ << "s, render_interval=" << render_interval_ << std::endl;
 
         // 可视化初始化
         // mjv_defaultCamera(&camera_);
@@ -239,7 +258,13 @@ private:
 
         acc_ = Eigen::Map<Vec3d>(data_->sensordata + 16);
 
-        omega_body_ = Eigen::Map<Vec3d>(data_->qvel + 3) + Vec3d(gyro_nd_(dre_), gyro_nd_(dre_), gyro_nd_(dre_));
+        // MuJoCo free-joint angular velocity is provided in world frame. Convert to body frame
+        // to match training observations (base_ang_vel in body frame).
+        Vec3d omega_world = Eigen::Map<Vec3d>(data_->qvel + 3);
+        Eigen::Quaterniond quat_world_from_body(qw, qx, qy, qz);
+        quat_world_from_body.normalize();
+        Vec3d omega_body = quat_world_from_body.conjugate() * omega_world;
+        omega_body_ = omega_body + Vec3d(gyro_nd_(dre_), gyro_nd_(dre_), gyro_nd_(dre_));
 
         // std::cout << "[IMU] RPY: " << rpy_.transpose()
         //       << " | Omega: " << omega_body_.transpose()

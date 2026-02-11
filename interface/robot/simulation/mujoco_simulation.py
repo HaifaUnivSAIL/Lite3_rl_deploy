@@ -20,6 +20,8 @@ CTRL_PORT = 30010
 USE_VIEWER = True
 DT = 0.001
 RENDER_INTERVAL = 10
+DEBUG_DUMPS = int(os.environ.get("LITE3_DEBUG_DUMPS", "0"))
+DEBUG_DUMP_DIR = os.environ.get("LITE3_DEBUG_DUMP_DIR", "")
 
 URDF_INIT = {
     # Match TwoLegStandCfg.init_state.default_joint_angles (training).
@@ -77,6 +79,8 @@ class MuJoCoSimulation:
         self.last_print_time = 0  # Track last print time
 
         print(f"[INFO] MuJoCo model loaded, dof = {self.dof_num}")
+        if DEBUG_DUMPS > 0:
+            self._dump_model_debug(xml_full)
 
         # Visualization
         self.viewer = None
@@ -118,6 +122,25 @@ class MuJoCoSimulation:
         qpos0[0:3] = base_pos[:3]
         qpos0[3:7] = base_quat_wxyz[:4]
         qpos0[7:7 + self.dof_num] = joint_pos[:self.dof_num]
+
+    def _dump_model_debug(self, xml_full: str):
+        dump_root = DEBUG_DUMP_DIR if DEBUG_DUMP_DIR else "/workspace/rl_training_new/debug_deploy"
+        os.makedirs(dump_root, exist_ok=True)
+        dump_path = os.path.join(dump_root, "mujoco_model_debug.txt")
+        with open(dump_path, "w") as f:
+            f.write(f"xml_full {xml_full}\n")
+            f.write(f"dof_num {self.dof_num}\n")
+            f.write("joint_names_qpos_order\n")
+            for i in range(self.model.njnt):
+                name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
+                f.write(f"{i} {name} qposadr={self.model.jnt_qposadr[i]}\n")
+            f.write("actuator_to_joint\n")
+            for i in range(self.model.nu):
+                trnid = self.model.actuator_trnid[i]
+                jnt_id = int(trnid[0])
+                jnt_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, jnt_id)
+                f.write(f"{i} joint={jnt_name} trnid={trnid.tolist()}\n")
+        print(f"[DEBUG] Wrote mujoco model debug to {dump_path}")
 
         qvel0[0:3] = base_lin_vel[:3]
         qvel0[3:6] = base_ang_vel[:3]
