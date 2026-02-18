@@ -13,10 +13,13 @@
 
 
 #include "state_base.h"
+#include <cstdlib>
+#include <string>
 
 class IdleState : public StateBase{
 private:
     bool joint_normal_flag_ = false, imu_normal_flag_ = false;
+    bool force_rl_start_ = false;
     bool first_enter_flag_ = true;
     VecXf joint_pos_, joint_vel_, joint_tau_;
     Vec3f rpy_, acc_, omg_;
@@ -95,6 +98,13 @@ private:
 public:
     IdleState(const RobotType& robot_type, const std::string& state_name, 
         std::shared_ptr<ControllerData> data_ptr):StateBase(robot_type, state_name, data_ptr){
+            if (const char* env = std::getenv("LITE3_FORCE_RL_START")) {
+                const std::string v(env);
+                force_rl_start_ = (v == "1" || v == "true" || v == "TRUE" || v == "on" || v == "yes");
+            }
+            if (force_rl_start_) {
+                std::cout << "[IdleState] LITE3_FORCE_RL_START enabled: bypass StandUp and enter RL directly after idle checks.\n";
+            }
         }
     ~IdleState(){}
 
@@ -133,6 +143,10 @@ public:
         }
         if(first_enter_flag_ && ri_ptr_->GetInterfaceTimeStamp() - enter_state_time_ < 0.5){
             return StateName::kIdle;
+        }
+
+        if(force_rl_start_) {
+            return StateName::kRLControl;
         }
             
         if(uc_ptr_->GetUserCommand().target_mode == int(RobotMotionState::StandingUp)) return StateName::kStandUp;

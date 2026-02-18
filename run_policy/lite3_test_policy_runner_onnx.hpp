@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -64,6 +65,7 @@ public:
         pending_action_hist_.clear();
         last_action_offset_.setZero(kActDim);
         SeedHistoryWithZeros();
+        LoadHistorySeedFromFileEnv();
         debug_dump_quota_ = ParseDebugQuota();
         std::cout << "[ONNX ENTER] History cleared. PolicyRunner entered: "
                   << policy_name_ << std::endl;
@@ -226,6 +228,13 @@ private:
     int debug_dump_quota_ = 0;
     bool action_hist_delayed_mode_ = false;
     std::string history_seed_mode_ = "training_parity";
+    bool history_seed_file_loaded_ = false;
+    bool history_seed_file_consumed_ = false;
+    std::string history_seed_file_path_;
+    std::vector<float> history_seed_pos_hist_;
+    std::vector<float> history_seed_vel_hist_;
+    std::vector<float> history_seed_act_hist_;
+    std::vector<float> history_seed_obs_hist_;
 
     void InitSession() {
         // Allow overriding model path without recompiling.
@@ -405,12 +414,143 @@ private:
         }
     }
 
+    bool LoadHistorySeedFromFileEnv() {
+        history_seed_file_loaded_ = false;
+        history_seed_file_consumed_ = false;
+        history_seed_file_path_.clear();
+        history_seed_pos_hist_.clear();
+        history_seed_vel_hist_.clear();
+        history_seed_act_hist_.clear();
+        history_seed_obs_hist_.clear();
+
+        const char* env_path = std::getenv("LITE3_HISTORY_SEED_FILE");
+        if (!(env_path && *env_path != '\0')) {
+            return false;
+        }
+        history_seed_file_path_ = env_path;
+
+        std::ifstream ifs(history_seed_file_path_);
+        if (!ifs.is_open()) {
+            std::cerr << "[ONNX] history seed file open failed: " << history_seed_file_path_ << "\n";
+            return false;
+        }
+
+        std::string line;
+        while (std::getline(ifs, line)) {
+            if (line.empty() || line[0] == '#') {
+                continue;
+            }
+            std::istringstream iss(line);
+            std::string key;
+            iss >> key;
+            if (key.empty()) {
+                continue;
+            }
+
+            std::vector<float>* target = nullptr;
+            if (key == "joint_pos_history" || key == "pos_hist") {
+                target = &history_seed_pos_hist_;
+            } else if (key == "joint_vel_history" || key == "vel_hist") {
+                target = &history_seed_vel_hist_;
+            } else if (key == "action_history" || key == "tgt_hist") {
+                target = &history_seed_act_hist_;
+            } else if (key == "obs_history") {
+                target = &history_seed_obs_hist_;
+            } else {
+                continue;
+            }
+
+            target->clear();
+            float value = 0.0f;
+            while (iss >> value) {
+                target->push_back(value);
+            }
+        }
+
+        const bool ok_pos = history_seed_pos_hist_.size() == 36;
+        const bool ok_vel = history_seed_vel_hist_.size() == 24;
+        const bool ok_act = history_seed_act_hist_.size() == 24;
+        const bool ok_obs = history_seed_obs_hist_.empty() || history_seed_obs_hist_.size() == (kHistoryLen * kObsDim);
+        if (!(ok_pos && ok_vel && ok_act && ok_obs)) {
+            std::cerr << "[ONNX] history seed file invalid sizes. "
+                      << "pos=" << history_seed_pos_hist_.size()
+                      << " vel=" << history_seed_vel_hist_.size()
+                      << " act=" << history_seed_act_hist_.size()
+                      << " obs=" << history_seed_obs_hist_.size() << "\n";
+            history_seed_pos_hist_.clear();
+            history_seed_vel_hist_.clear();
+            history_seed_act_hist_.clear();
+            history_seed_obs_hist_.clear();
+            return false;
+        }
+
+        history_seed_file_loaded_ = true;
+        std::cout << "[ONNX] history seed file loaded: " << history_seed_file_path_
+                  << " (obs_history=" << (history_seed_obs_hist_.empty() ? "missing" : "present") << ")\n";
+        return true;
+    }
+
+    bool ApplyHistorySeedFromFile() {
+        if (!history_seed_file_loaded_ || history_seed_file_consumed_) {
+            return false;
+        }
+
+        pos_hist_.clear();
+        vel_hist_.clear();
+        tgt_hist_.clear();
+        pending_action_hist_.clear();
+
+        for (int frame = 0; frame < 3; ++frame) {
+            VecXf v(kActDim);
+            for (int j = 0; j < kActDim; ++j) {
+                v(j) = history_seed_pos_hist_[frame * kActDim + j];
+            }
+            pos_hist_.push_back(v);
+        }
+        for (int frame = 0; frame < 2; ++frame) {
+            VecXf v(kActDim);
+            for (int j = 0; j < kActDim; ++j) {
+                v(j) = history_seed_vel_hist_[frame * kActDim + j];
+            }
+            vel_hist_.push_back(v);
+        }
+        for (int frame = 0; frame < 2; ++frame) {
+            VecXf v(kActDim);
+            for (int j = 0; j < kActDim; ++j) {
+                v(j) = history_seed_act_hist_[frame * kActDim + j];
+            }
+            tgt_hist_.push_back(v);
+        }
+
+        if (!history_seed_obs_hist_.empty()) {
+            history_frames_.clear();
+            for (int frame = 0; frame < kHistoryLen; ++frame) {
+                VecXf v(kObsDim);
+                for (int j = 0; j < kObsDim; ++j) {
+                    v(j) = history_seed_obs_hist_[frame * kObsDim + j];
+                }
+                history_frames_.push_back(v);
+            }
+        }
+
+        action_hist_delayed_mode_ = false;
+        history_seed_mode_ = "replay_file";
+        last_action_raw_ = tgt_hist_.back();
+        last_action_offset_ = last_action_raw_;
+        history_seed_file_consumed_ = true;
+        std::cout << "[ONNX] history replay applied from file on reset.\n";
+        return true;
+    }
+
     void SeedWithinFrameHistoriesWithCurrentJointState(const VecXf& joint_pos,
                                                        const VecXf& joint_vel) {
         pos_hist_.clear();
         vel_hist_.clear();
         tgt_hist_.clear();
         pending_action_hist_.clear();
+        if (ApplyHistorySeedFromFile()) {
+            return;
+        }
         const VecXf joint_pos_rel = joint_pos - dof_pos_default_policy_;
         const VecXf reset_action = joint_pos_rel;
         const char* mode_env = std::getenv("LITE3_HISTORY_SEED_MODE");
@@ -710,6 +850,10 @@ private:
         ofs << "\nhistory_frame_push_mode single_first_step";
         ofs << "\naction_history_mode "
             << (action_hist_delayed_mode_ ? "training_parity_zero_seed_delay1" : (history_seed_mode_ + "_direct"));
+        ofs << "\nhistory_seed_file_loaded " << (history_seed_file_loaded_ ? 1 : 0);
+        ofs << "\nhistory_seed_file_used " << (history_seed_file_consumed_ ? 1 : 0);
+        ofs << "\nhistory_seed_file_path "
+            << ((history_seed_file_loaded_ || history_seed_file_consumed_) ? history_seed_file_path_ : "none");
         ofs << "\njoint_pos_history";
         for (const auto& ph : pos_hist_) {
             for (int i = 0; i < kActDim; ++i) ofs << " " << ph(i);

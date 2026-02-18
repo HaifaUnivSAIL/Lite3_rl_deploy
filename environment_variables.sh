@@ -1,25 +1,45 @@
 #!/usr/bin/env bash
-# Helper script to export the environment variables commonly used while
-# debugging the Lite3 deployment pipeline. Source it from the project root:
+# Helper script for deploy runtime environment variables.
+# Source from repo root:
 #   source Lite3_rl_deploy/environment_variables.sh
+#
+# Safe default policy:
+# - behavior-changing debug overrides are OFF by default
+# - debug dumps are ON by default (behavior-neutral)
 
-# Fixed command sent to the policy (lin_vel_x lin_vel_y ang_vel_yaw)
-export LITE3_FIXED_CMD="0 0 0"
+# Clear behavior-changing overrides in case they leaked from older shells.
+unset LITE3_FORCE_RL_START
+unset LITE3_FIXED_CMD
+unset LITE3_DEFAULT_CMD
+unset LITE3_DEPLOY_STATE
+unset LITE3_HISTORY_SEED_FILE
+unset LITE3_HISTORY_SEED_MODE
+unset LITE3_DISABLE_POSTURE_CHECK
+unset LITE3_POSTURE_LIMIT_ROLL_DEG
+unset LITE3_POSTURE_LIMIT_PITCH_DEG
+unset LITE3_POLICY_ASYNC
+unset LITE3_POLICY_DECIMATION
+unset LITE3_POLICY_CONTROL_DT
+unset LITE3_MUJOCO_DT
+unset LITE3_RANDOM_RESET
+unset LITE3_IMU_GYRO_NOISE_STD
+unset LITE3_IMU_RPY_NOISE_STD
+unset LITE3_IMU_ACC_NOISE_STD
 
-# Optional: override which ONNX model the deploy binary loads.
+# Keep debug dumps enabled by default (does not affect policy/control outputs).
+export LITE3_DEBUG_DUMPS="${LITE3_DEBUG_DUMPS:-5}"
+
+# Optional: override ONNX model path loaded by deploy.
 # - Absolute paths are used as-is.
-# - Relative paths are resolved from the current working directory (typically `Lite3_rl_deploy/build`).
+# - Relative paths are resolved from cwd (typically Lite3_rl_deploy/build).
 # export LITE3_POLICY_ONNX="/home/sail/Lite3/Lite3_rl_deploy/policy/ppo/policy.onnx"
 
-# Optional: disable random reset for MuJoCo C++ sim (USE_MJCPP)
-# export LITE3_RANDOM_RESET=0
-
-# Disable the posture safety guard (set to 0 to re-enable)
-export LITE3_DISABLE_POSTURE_CHECK=1
-
-# Optional: adjust posture guard thresholds (degrees) when enabled
-export LITE3_POSTURE_LIMIT_ROLL_DEG=40
-export LITE3_POSTURE_LIMIT_PITCH_DEG=90
-
-# Path to the saved Mujoco snapshot used to seed play.py / training resets
-export LITE3_DEPLOY_STATE="/home/sail/Lite3/Lite3_rl_training/legged_gym/legged_gym/envs/base/deploy_snapshot.json"
+# Optional behavior-changing toggles (debug only, opt-in):
+# export LITE3_FORCE_RL_START=1
+# export LITE3_FIXED_CMD="0 0 0"
+# export LITE3_DEFAULT_CMD="0 0 0"
+# export LITE3_DEPLOY_STATE="/path/to/deploy_snapshot.json"
+# export LITE3_HISTORY_SEED_FILE="/path/to/history_seed.txt"
+# export LITE3_DISABLE_POSTURE_CHECK=1
+# export LITE3_POSTURE_LIMIT_ROLL_DEG=40
+# export LITE3_POSTURE_LIMIT_PITCH_DEG=90

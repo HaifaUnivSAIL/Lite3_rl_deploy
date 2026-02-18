@@ -24,6 +24,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <array>
 
 
 #include <atomic>
@@ -60,6 +61,13 @@ private:
     double run_time_ = 0.0;
     int run_cnt_ = 0;
     VecXd tau_ff_;
+    bool clip_tau_to_training_limits_ = true;
+    std::array<double, 12> training_effort_limits_ {{
+        24.0, 24.0, 36.0,
+        24.0, 24.0, 36.0,
+        24.0, 24.0, 36.0,
+        24.0, 24.0, 36.0
+    }};
 
     int render_interval_ = 10;
 
@@ -126,6 +134,9 @@ public:
         const double gyro_noise_std = parse_nonnegative_std("LITE3_IMU_GYRO_NOISE_STD", 0.0);
         const double rpy_noise_std = parse_nonnegative_std("LITE3_IMU_RPY_NOISE_STD", 0.0);
         const double acc_noise_std = parse_nonnegative_std("LITE3_IMU_ACC_NOISE_STD", 0.0);
+        if (const char* clip_env = std::getenv("LITE3_TAU_CLIP_TRAINING_LIMITS")) {
+            clip_tau_to_training_limits_ = std::atoi(clip_env) != 0;
+        }
         gyro_nd_ = std::normal_distribution<>(0.0, gyro_noise_std);
         rpy_nd_ = std::normal_distribution<>(0.0, rpy_noise_std);
         acc_nd_ = std::normal_distribution<>(0.0, acc_noise_std);
@@ -134,6 +145,8 @@ public:
         std::cout << "[MuJoCoInterface] imu_noise_std rpy=" << rpy_noise_std
                   << " gyro=" << gyro_noise_std
                   << " acc=" << acc_noise_std << std::endl;
+        std::cout << "[MuJoCoInterface] tau_clip_training_limits="
+                  << (clip_tau_to_training_limits_ ? "on" : "off") << std::endl;
 
         // 可视化初始化
         // mjv_defaultCamera(&camera_);
@@ -322,6 +335,12 @@ private:
         VecXd tau_out = kp.cwiseProduct(q_des - joint_pos_)
                       + kd.cwiseProduct(dq_des - joint_vel_)
                       + tau_ff;
+        if (clip_tau_to_training_limits_ && dof_num_ == 12) {
+            for (int i = 0; i < dof_num_; ++i) {
+                const double lim = training_effort_limits_[i];
+                tau_out(i) = std::min(std::max(tau_out(i), -lim), lim);
+            }
+        }
         
         // std::cout << "[ApplyCtrl] tau_out[0:3]: " << tau_out.head(3).transpose()
         //       << " | q_des[0:3]: " << q_des.head(3).transpose()
