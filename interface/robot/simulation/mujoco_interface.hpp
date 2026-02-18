@@ -55,7 +55,8 @@ private:
     Vec3d default_base_pos_;
 
 
-    double dt_ = 0.001;
+    // Match training physics step by default (TwoLegStandCfg.sim.dt = 0.005s).
+    double dt_ = 0.005;
     double run_time_ = 0.0;
     int run_cnt_ = 0;
     VecXd tau_ff_;
@@ -63,7 +64,7 @@ private:
     int render_interval_ = 10;
 
     std::default_random_engine dre_;
-    std::normal_distribution<> gyro_nd_{0, 0.0001}, rpy_nd_{0, 0.005}, acc_nd_{0, 0.0};
+    std::normal_distribution<> gyro_nd_{0.0, 0.0}, rpy_nd_{0.0, 0.0}, acc_nd_{0.0, 0.0};
 
 public:
     MujocoInterface(const std::string& robot_name,
@@ -112,8 +113,27 @@ public:
                 render_interval_ = parsed;
             }
         }
+        auto parse_nonnegative_std = [](const char* env_key, double fallback) -> double {
+            const char* env = std::getenv(env_key);
+            if (!env) return fallback;
+            char* endptr = nullptr;
+            const double parsed = std::strtod(env, &endptr);
+            if (endptr == env || !std::isfinite(parsed) || parsed < 0.0) {
+                return fallback;
+            }
+            return parsed;
+        };
+        const double gyro_noise_std = parse_nonnegative_std("LITE3_IMU_GYRO_NOISE_STD", 0.0);
+        const double rpy_noise_std = parse_nonnegative_std("LITE3_IMU_RPY_NOISE_STD", 0.0);
+        const double acc_noise_std = parse_nonnegative_std("LITE3_IMU_ACC_NOISE_STD", 0.0);
+        gyro_nd_ = std::normal_distribution<>(0.0, gyro_noise_std);
+        rpy_nd_ = std::normal_distribution<>(0.0, rpy_noise_std);
+        acc_nd_ = std::normal_distribution<>(0.0, acc_noise_std);
         model_->opt.timestep = dt_;
         std::cout << "[MuJoCoInterface] dt=" << dt_ << "s, render_interval=" << render_interval_ << std::endl;
+        std::cout << "[MuJoCoInterface] imu_noise_std rpy=" << rpy_noise_std
+                  << " gyro=" << gyro_noise_std
+                  << " acc=" << acc_noise_std << std::endl;
 
         // 可视化初始化
         // mjv_defaultCamera(&camera_);
@@ -174,6 +194,10 @@ public:
     virtual Vec3f GetImuRpy() override { return rpy_.cast<float>(); }
     virtual Vec3f GetImuAcc() override { return acc_.cast<float>(); }
     virtual Vec3f GetImuOmega() override { return omega_body_.cast<float>(); }
+    virtual Vec4f GetImuQuat() override {
+        // MuJoCo stores free-joint quaternion in qpos[3:7] as (w, x, y, z).
+        return Eigen::Map<Vec4d>(data_->qpos + 3, 4).cast<float>();
+    }
     virtual VecXf GetContactForce() override { return VecXf::Zero(4); }
 
 
@@ -190,6 +214,10 @@ public:
     virtual void Stop() override {
         start_flag_ = false;
         sim_thread_.join();
+    }
+
+    double GetSimulationDt() const {
+        return dt_;
     }
 
 private:
@@ -402,10 +430,10 @@ private:
             }
         }
 
-        // Mimic training reset: randomize joint positions around defaults (0.5x–1.5x).
-        bool use_random_reset = true;
+        // Default to deterministic reset for deploy parity experiments.
+        bool use_random_reset = false;
         if (const char* env = std::getenv("LITE3_RANDOM_RESET")) {
-            // Set LITE3_RANDOM_RESET=0 to disable randomization.
+            // Set LITE3_RANDOM_RESET=1 to enable randomization.
             use_random_reset = std::atoi(env) != 0;
         }
         Eigen::VectorXd init_joint = default_joint_pos_;

@@ -122,6 +122,13 @@ class MuJoCoSimulation:
         qpos0[0:3] = base_pos[:3]
         qpos0[3:7] = base_quat_wxyz[:4]
         qpos0[7:7 + self.dof_num] = joint_pos[:self.dof_num]
+        qvel0[0:3] = base_lin_vel[:3]
+        qvel0[3:6] = base_ang_vel[:3]
+        qvel0[6:6 + self.dof_num] = joint_vel[:self.dof_num]
+
+        self.data.qpos[:] = qpos0
+        self.data.qvel[:] = qvel0
+        mujoco.mj_forward(self.model, self.data)
 
     def _dump_model_debug(self, xml_full: str):
         dump_root = DEBUG_DUMP_DIR if DEBUG_DUMP_DIR else "/workspace/rl_training_new/debug_deploy"
@@ -141,14 +148,6 @@ class MuJoCoSimulation:
                 jnt_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, jnt_id)
                 f.write(f"{i} joint={jnt_name} trnid={trnid.tolist()}\n")
         print(f"[DEBUG] Wrote mujoco model debug to {dump_path}")
-
-        qvel0[0:3] = base_lin_vel[:3]
-        qvel0[3:6] = base_ang_vel[:3]
-        qvel0[6:6 + self.dof_num] = joint_vel[:self.dof_num]
-
-        self.data.qpos[:] = qpos0
-        self.data.qvel[:] = qvel0
-        mujoco.mj_forward(self.model, self.data)
 
     def print_debug_info(self):
         """Consolidated function to print debug information with colors and aligned formatting."""

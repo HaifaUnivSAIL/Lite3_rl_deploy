@@ -61,6 +61,7 @@ public:
         pos_hist_.clear();
         vel_hist_.clear();
         tgt_hist_.clear();
+        pending_action_hist_.clear();
         last_action_offset_.setZero(kActDim);
         SeedHistoryWithZeros();
         debug_dump_quota_ = ParseDebugQuota();
@@ -76,10 +77,24 @@ public:
         Vec3f cmd = ro.cmd_vel_normlized;
         SaturateVec3(cmd, -1.f, 1.f);
 
-        // Match training's (legacy) quaternion interpretation for base_rpy.
-        // Training code reads root_quat_w as if it were [x,y,z,w] (it is [w,x,y,z]),
-        // so we intentionally mirror that behavior for parity.
-        Vec3f base_rpy = ComputeTrainingRpyFromRotMat(ro.base_rot_mat);
+        // Match training observation helper in
+        // rl_training_new/.../two_leg_stand/mdp/observations.py:
+        // it consumes root_quat_w with legacy XYZW interpretation.
+        const bool quat_valid = ro.base_quat.allFinite() && ro.base_quat.norm() > 1e-6f;
+        const Vec4f quat_identity(1.f, 0.f, 0.f, 0.f);
+        const bool quat_is_identity = quat_valid &&
+            (ro.base_quat - quat_identity).cwiseAbs().maxCoeff() < 1e-6f;
+        // Some interfaces do not provide quaternion and fall back to identity.
+        // Keep the previously working parity path: use rotmat on step0 in that case,
+        // then switch to quaternion mapping after the first policy step.
+        Vec3f base_rpy = (quat_valid && !(quat_is_identity && run_cnt_ == 0))
+            ? ComputeTrainingLegacyRpyFromQuatWxyz(ro.base_quat.normalized())
+            : ComputeTrainingLegacyRpyFromRotMat(ro.base_rot_mat);
+        // Canonicalize the first policy-step +/-pi branch to a stable negative representative.
+        // This removes reset-time branch ambiguity while preserving later-step dynamics.
+        if (run_cnt_ == 0) {
+            base_rpy(0) = CanonicalizePiBranchNegative(base_rpy(0));
+        }
         Vec3f projected_gravity = ro.projected_gravity;
         // Training uses base-frame angular velocity (quat_rotate_inverse).
         // Interfaces already provide body-frame IMU omega, so do NOT rotate again.
@@ -96,13 +111,7 @@ public:
         current_obs_ = current_obs_.array().max(-kObsClip).min(kObsClip).matrix();
 
         // Update 40×117 history buffer (HistoryWrapper behaviour: oldest first).
-        // Training play does two history appends before the first policy step, so we
-        // mirror that by pushing the current obs twice on the very first call.
-        const bool first_hist_push = (run_cnt_ == 0);
         history_frames_.push_back(current_obs_);
-        if (first_hist_push) {
-            history_frames_.push_back(current_obs_);
-        }
         while (static_cast<int>(history_frames_.size()) > kHistoryLen) {
             history_frames_.pop_front();
         }
@@ -156,6 +165,7 @@ public:
             projected_gravity,
             body_omega,
             omega_world,
+            ro.base_quat,
             ro.base_rot_mat,
             joint_pos_policy,
             joint_vel_policy,
@@ -206,6 +216,7 @@ private:
     std::deque<VecXf> pos_hist_;
     std::deque<VecXf> vel_hist_;
     std::deque<VecXf> tgt_hist_;
+    std::deque<VecXf> pending_action_hist_;
 
     VecXf action_raw_ = VecXf::Zero(kActDim);
     VecXf last_action_raw_ = VecXf::Zero(kActDim);
@@ -213,6 +224,8 @@ private:
 
     RobotAction ra_;
     int debug_dump_quota_ = 0;
+    bool action_hist_delayed_mode_ = false;
+    std::string history_seed_mode_ = "training_parity";
 
     void InitSession() {
         // Allow overriding model path without recompiling.
@@ -231,23 +244,27 @@ private:
         input_names_.push_back("obs");
         output_names_.push_back("action");
         LogModelInfo();
-        // Match training control.decimation (TwoLegStandCfg.control.decimation = 4).
-        decimation_ = 4;
+        // Match training control period by default.
+        // Training uses sim.dt=0.005 and decimation=4 => control_dt=0.02s.
+        double sim_dt = 0.005;
+        if (const char* dt_env = std::getenv("LITE3_MUJOCO_DT")) {
+            char* endptr = nullptr;
+            const double parsed = std::strtod(dt_env, &endptr);
+            if (endptr != dt_env && std::isfinite(parsed) && parsed > 0.0) {
+                sim_dt = parsed;
+            }
+        }
+        decimation_ = std::max(1, static_cast<int>(std::lround(0.02 / sim_dt)));
         if (const char* dec_env = std::getenv("LITE3_POLICY_DECIMATION")) {
             const int parsed = std::atoi(dec_env);
             if (parsed > 0) {
                 decimation_ = parsed;
             }
         }
-        if (const char* dt_env = std::getenv("LITE3_MUJOCO_DT")) {
-            char* endptr = nullptr;
-            const double parsed = std::strtod(dt_env, &endptr);
-            if (endptr != dt_env && std::isfinite(parsed) && parsed > 0.0) {
-                const double ctrl_dt = parsed * static_cast<double>(decimation_);
-                std::cout << "[ONNX] decimation=" << decimation_
-                          << ", control_dt=" << ctrl_dt << "s (from LITE3_MUJOCO_DT)" << std::endl;
-            }
-        }
+        const double ctrl_dt = sim_dt * static_cast<double>(decimation_);
+        std::cout << "[ONNX] sim_dt=" << sim_dt
+                  << ", decimation=" << decimation_
+                  << ", control_dt=" << ctrl_dt << "s" << std::endl;
     }
 
     void InitRobotConstants() {
@@ -255,9 +272,9 @@ private:
         // Match training init_state joint_pos in Lite3TwoLegStandEnvCfg (base_env_cfg.py).
         dof_pos_default_policy_.resize(kActDim);
         dof_pos_default_policy_ <<
-            -0.015f,  0.016f, -0.022f,  0.022f,  // HipX: FL, FR, HL, HR
-            -0.770f, -0.770f, -0.770f, -0.770f,  // HipY: FL, FR, HL, HR
-             1.540f,  1.540f,  1.550f,  1.550f;  // Knee: FL, FR, HL, HR
+            -0.0154048f,  0.0159887f, -0.0221317f,  0.0224431f,  // HipX: FL, FR, HL, HR
+            -0.7669700f, -0.7682860f, -0.7658650f, -0.7672030f,  // HipY: FL, FR, HL, HR
+             1.5376100f,  1.5363600f,  1.5478800f,  1.5467900f;  // Knee: FL, FR, HL, HR
 
         kp_ = 20.f * VecXf::Ones(kActDim);
         kd_ =  0.7f * VecXf::Ones(kActDim);
@@ -335,60 +352,50 @@ private:
         return inv;
     }
 
-    static Vec3f ComputeTrainingRpyFromRotMat(const Mat3f& rot_mat) {
-        // Convert rotation matrix to quaternion (w, x, y, z).
-        const float tr = rot_mat.trace();
-        float w, x, y, z;
-        if (tr > 0.0f) {
-            const float S = std::sqrt(tr + 1.0f) * 2.0f;
-            w = 0.25f * S;
-            x = (rot_mat(2, 1) - rot_mat(1, 2)) / S;
-            y = (rot_mat(0, 2) - rot_mat(2, 0)) / S;
-            z = (rot_mat(1, 0) - rot_mat(0, 1)) / S;
-        } else if ((rot_mat(0, 0) > rot_mat(1, 1)) && (rot_mat(0, 0) > rot_mat(2, 2))) {
-            const float S = std::sqrt(1.0f + rot_mat(0, 0) - rot_mat(1, 1) - rot_mat(2, 2)) * 2.0f;
-            w = (rot_mat(2, 1) - rot_mat(1, 2)) / S;
-            x = 0.25f * S;
-            y = (rot_mat(0, 1) + rot_mat(1, 0)) / S;
-            z = (rot_mat(0, 2) + rot_mat(2, 0)) / S;
-        } else if (rot_mat(1, 1) > rot_mat(2, 2)) {
-            const float S = std::sqrt(1.0f + rot_mat(1, 1) - rot_mat(0, 0) - rot_mat(2, 2)) * 2.0f;
-            w = (rot_mat(0, 2) - rot_mat(2, 0)) / S;
-            x = (rot_mat(0, 1) + rot_mat(1, 0)) / S;
-            y = 0.25f * S;
-            z = (rot_mat(1, 2) + rot_mat(2, 1)) / S;
-        } else {
-            const float S = std::sqrt(1.0f + rot_mat(2, 2) - rot_mat(0, 0) - rot_mat(1, 1)) * 2.0f;
-            w = (rot_mat(1, 0) - rot_mat(0, 1)) / S;
-            x = (rot_mat(0, 2) + rot_mat(2, 0)) / S;
-            y = (rot_mat(1, 2) + rot_mat(2, 1)) / S;
-            z = 0.25f * S;
-        }
+    static Vec3f ComputeTrainingLegacyRpyFromQuatWxyz(const Vec4f& quat_wxyz) {
+        const float qw = quat_wxyz(0);
+        const float qx = quat_wxyz(1);
+        const float qy = quat_wxyz(2);
+        const float qz = quat_wxyz(3);
 
-        // Training code treats quaternion as [x, y, z, w] even though source is [w, x, y, z].
-        const float qx = w;
-        const float qy = x;
-        const float qz = y;
-        const float qw = z;
+        // Training code treats root_quat_w as XYZW, while source is WXYZ.
+        const float w = qz;
+        const float x = qw;
+        const float y = qx;
+        const float z = qy;
 
-        const float sinr_cosp = 2.0f * (qw * qx + qy * qz);
-        const float cosr_cosp = 1.0f - 2.0f * (qx * qx + qy * qy);
-        float roll = std::atan2(sinr_cosp, cosr_cosp);
+        const float sinr_cosp = 2.0f * (w * x + y * z);
+        const float cosr_cosp = 1.0f - 2.0f * (x * x + y * y);
+        const float roll = std::atan2(sinr_cosp, cosr_cosp);
 
-        float sinp = 2.0f * (qw * qy - qz * qx);
-        sinp = std::min(1.0f, std::max(-1.0f, sinp));
+        float sinp = 2.0f * (w * y - z * x);
+        sinp = std::max(-1.0f, std::min(1.0f, sinp));
         const float pitch = std::asin(sinp);
 
-        const float siny_cosp = 2.0f * (qw * qz + qx * qy);
-        const float cosy_cosp = 1.0f - 2.0f * (qy * qy + qz * qz);
+        const float siny_cosp = 2.0f * (w * z + x * y);
+        const float cosy_cosp = 1.0f - 2.0f * (y * y + z * z);
         const float yaw = std::atan2(siny_cosp, cosy_cosp);
 
-        // Training roll stays near -pi (due to quaternion mis-interpretation). Match that wrap.
-        if (roll > 0.0f) {
-            roll -= 2.0f * static_cast<float>(M_PI);
-        }
-
         return Vec3f(roll, pitch, yaw);
+    }
+
+    static Vec3f ComputeTrainingLegacyRpyFromRotMat(const Mat3f& rot_mat) {
+        Eigen::Quaternionf q(rot_mat);
+        q.normalize();
+        Vec4f quat_wxyz;
+        quat_wxyz << q.w(), q.x(), q.y(), q.z();
+        return ComputeTrainingLegacyRpyFromQuatWxyz(quat_wxyz);
+    }
+
+    static float CanonicalizePiBranchNegative(float angle_rad) {
+        // Training/deploy parity issue: the legacy quaternion->RPY path can flip between +pi and -pi
+        // for essentially the same attitude due to tiny yaw sign differences near identity.
+        constexpr float kPi = static_cast<float>(M_PI);
+        constexpr float kNearPiEps = 0.25f;
+        if (std::abs(std::abs(angle_rad) - kPi) < kNearPiEps) {
+            return -std::abs(angle_rad);
+        }
+        return angle_rad;
     }
 
     void SeedHistoryWithZeros() {
@@ -403,29 +410,48 @@ private:
         pos_hist_.clear();
         vel_hist_.clear();
         tgt_hist_.clear();
+        pending_action_hist_.clear();
+        const VecXf joint_pos_rel = joint_pos - dof_pos_default_policy_;
+        const VecXf reset_action = joint_pos_rel;
+        const char* mode_env = std::getenv("LITE3_HISTORY_SEED_MODE");
+        const std::string mode = (mode_env && *mode_env != '\0') ? std::string(mode_env) : "training_parity";
+        history_seed_mode_ = mode;
+        action_hist_delayed_mode_ = false;
 
-        // Training warm-up fills history with standup/joint-damping data. To better match
-        // that distribution, seed pos/vel history near zero and action history near -default.
-        const char* seed_env = std::getenv("LITE3_HISTORY_SEED_CURRENT");
-        const bool seed_current = (seed_env && std::atoi(seed_env) != 0);
-
-        if (seed_current) {
-            for (int i = 0; i < 3; ++i) pos_hist_.push_back(joint_pos);
+        if (mode == "current_rel") {
+            std::cout << "[ONNX] history seed mode: current_rel (pos=rel, vel=current, tgt=rel)" << std::endl;
+            for (int i = 0; i < 3; ++i) pos_hist_.push_back(joint_pos_rel);
             for (int i = 0; i < 2; ++i) vel_hist_.push_back(joint_vel);
-            VecXf init_target = joint_pos - dof_pos_default_policy_;
+            for (int i = 0; i < 2; ++i) tgt_hist_.push_back(joint_pos_rel);
+            last_action_offset_ = joint_pos_rel;
+            last_action_raw_ = joint_pos_rel;
+            return;
+        }
+
+        if (mode == "standup_like") {
+            VecXf zero = VecXf::Zero(kActDim);
+            std::cout << "[ONNX] history seed mode: standup_like (pos=0, vel=current, tgt=-default)" << std::endl;
+            for (int i = 0; i < 3; ++i) pos_hist_.push_back(zero);
+            for (int i = 0; i < 2; ++i) vel_hist_.push_back(joint_vel);
+            VecXf init_target = -dof_pos_default_policy_;
             for (int i = 0; i < 2; ++i) tgt_hist_.push_back(init_target);
             last_action_offset_ = init_target;
             last_action_raw_ = init_target;
             return;
         }
 
-        VecXf zero = VecXf::Zero(kActDim);
-        for (int i = 0; i < 3; ++i) pos_hist_.push_back(zero);
-        for (int i = 0; i < 2; ++i) vel_hist_.push_back(zero);
-        VecXf init_target = -dof_pos_default_policy_;
-        for (int i = 0; i < 2; ++i) tgt_hist_.push_back(init_target);
-        last_action_offset_ = init_target;
-        last_action_raw_ = init_target;
+        // Default path: match training observation history semantics:
+        // - pos history uses absolute joint positions,
+        // - vel history uses current joint velocity,
+        // - action history in play parity starts from zeros and updates with a one-step delay:
+        //   [0,0] -> [0,a0] -> [a0,a1] ...
+        std::cout << "[ONNX] history seed mode: training_parity (pos=abs, vel=current, tgt=zero+delay1)" << std::endl;
+        action_hist_delayed_mode_ = true;
+        for (int i = 0; i < 3; ++i) pos_hist_.push_back(joint_pos);
+        for (int i = 0; i < 2; ++i) vel_hist_.push_back(joint_vel);
+        for (int i = 0; i < 2; ++i) tgt_hist_.push_back(VecXf::Zero(kActDim));
+        last_action_offset_ = reset_action;
+        last_action_raw_ = reset_action;
     }
 
     void UpdateWithinFrameHistories(const VecXf& joint_pos_policy,
@@ -440,8 +466,20 @@ private:
         vel_hist_.push_back(joint_vel_policy);
         if (static_cast<int>(vel_hist_.size()) > 2) vel_hist_.pop_front();
 
-        tgt_hist_.push_back(last_action_raw_);
-        if (static_cast<int>(tgt_hist_.size()) > 2) tgt_hist_.pop_front();
+        // action_history stores (t-2, t-1).
+        // For training parity, keep one-step delayed insertion:
+        // step0 obs=[0,0], step1 obs=[0,0], step2 obs=[0,a0], step3 obs=[a0,a1], ...
+        if (action_hist_delayed_mode_) {
+            pending_action_hist_.push_back(last_action_raw_);
+            if (static_cast<int>(pending_action_hist_.size()) > 1) {
+                tgt_hist_.push_back(pending_action_hist_.front());
+                pending_action_hist_.pop_front();
+                if (static_cast<int>(tgt_hist_.size()) > 2) tgt_hist_.pop_front();
+            }
+        } else {
+            tgt_hist_.push_back(last_action_raw_);
+            if (static_cast<int>(tgt_hist_.size()) > 2) tgt_hist_.pop_front();
+        }
     }
 
     void MapRobotStateToPolicyOrder(const RobotBasicState& ro,
@@ -582,6 +620,7 @@ private:
                               const Vec3f& projected_gravity,
                               const Vec3f& body_omega,
                               const Vec3f& omega_world,
+                              const Vec4f& base_quat_wxyz,
                               const Mat3f& base_rot_mat,
                               const VecXf& joint_pos_policy,
                               const VecXf& joint_vel_policy,
@@ -593,9 +632,29 @@ private:
         if (env_dir && *env_dir != '\0') {
             candidates.emplace_back(env_dir);
         }
+        // Auto-resolve training debug directory from deploy build location.
+        // Works for both:
+        //   /workspace/Lite3_rl_deploy/build  -> /workspace/rl_training_new/lite3_debug/deploy
+        //   ~/Lite3/Lite3_rl_deploy/build     -> ~/Lite3/rl_training_new/lite3_debug/deploy
+        {
+            std::error_code ec;
+            std::filesystem::path p = std::filesystem::weakly_canonical(GetAbsPath(), ec);
+            if (!ec && !p.empty()) {
+                const std::filesystem::path root = p.parent_path().parent_path();  // .../Lite3 or /workspace
+                if (!root.empty()) {
+                    candidates.emplace_back((root / "rl_training_new" / "lite3_debug" / "deploy").string());
+                    candidates.emplace_back((root / "rl_training_new" / "debug_deploy").string());
+                }
+            }
+        }
         if (std::filesystem::exists("/workspace/rl_training_new")) {
             candidates.emplace_back("/workspace/rl_training_new/lite3_debug/deploy");
             candidates.emplace_back("/workspace/rl_training_new/debug_deploy");
+        }
+        if (const char* home = std::getenv("HOME")) {
+            std::filesystem::path h(home);
+            candidates.emplace_back((h / "Lite3" / "rl_training_new" / "lite3_debug" / "deploy").string());
+            candidates.emplace_back((h / "Lite3" / "rl_training_new" / "debug_deploy").string());
         }
         candidates.emplace_back("/tmp/lite3_debug");
 
@@ -612,6 +671,9 @@ private:
             std::cerr << "[DEBUG] Failed to create any debug dump directory; disabling dumps.\n";
             debug_dump_quota_ = 0;
             return;
+        }
+        if (run_cnt_ == 0) {
+            std::cout << "[DEBUG] deploy dump root: " << dump_root << std::endl;
         }
         const std::string fname = dump_root + "/debug_cpp_step" + std::to_string(run_cnt_) + ".txt";
         std::ofstream ofs(fname);
@@ -630,6 +692,8 @@ private:
         for (int i = 0; i < 3; ++i) ofs << " " << body_omega(i);
         ofs << "\nomega_world";
         for (int i = 0; i < 3; ++i) ofs << " " << omega_world(i);
+        ofs << "\nbase_quat_wxyz";
+        for (int i = 0; i < 4; ++i) ofs << " " << base_quat_wxyz(i);
         ofs << "\nbase_rot_mat";
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
@@ -640,10 +704,46 @@ private:
         for (int i = 0; i < kActDim; ++i) ofs << " " << joint_pos_policy(i);
         ofs << "\njoint_vel_policy";
         for (int i = 0; i < kActDim; ++i) ofs << " " << joint_vel_policy(i);
+        ofs << "\nobs_contract cmd:3 base_rpy:3 body_omega:3 joint_pos:12 joint_vel:12 joint_pos_history:36 joint_vel_history:24 action_history:24";
+        ofs << "\nparity_build_id 2026-02-16-rpy-from-quat-history-abs-noise0-quat-fallback-rpy-actionhist-zero-delay1-rpy-step0-pi-canonical-neg";
+        ofs << "\nbase_rpy_mode legacy_xyzw_from_rotmat_step0_pi_canonical_neg";
+        ofs << "\nhistory_frame_push_mode single_first_step";
+        ofs << "\naction_history_mode "
+            << (action_hist_delayed_mode_ ? "training_parity_zero_seed_delay1" : (history_seed_mode_ + "_direct"));
+        ofs << "\njoint_pos_history";
+        for (const auto& ph : pos_hist_) {
+            for (int i = 0; i < kActDim; ++i) ofs << " " << ph(i);
+        }
+        // legacy alias kept for compatibility with older compare reports
+        ofs << "\npos_hist";
+        for (const auto& ph : pos_hist_) {
+            for (int i = 0; i < kActDim; ++i) ofs << " " << ph(i);
+        }
+        ofs << "\njoint_vel_history";
+        for (const auto& vh : vel_hist_) {
+            for (int i = 0; i < kActDim; ++i) ofs << " " << vh(i);
+        }
+        // legacy alias kept for compatibility with older compare reports
+        ofs << "\nvel_hist";
+        for (const auto& vh : vel_hist_) {
+            for (int i = 0; i < kActDim; ++i) ofs << " " << vh(i);
+        }
+        ofs << "\naction_history";
+        for (const auto& ah : tgt_hist_) {
+            for (int i = 0; i < kActDim; ++i) ofs << " " << ah(i);
+        }
+        // legacy alias kept for compatibility with older compare reports
+        ofs << "\ntgt_hist";
+        for (const auto& ah : tgt_hist_) {
+            for (int i = 0; i < kActDim; ++i) ofs << " " << ah(i);
+        }
         ofs << "\naction_raw";
         for (int i = 0; i < kActDim; ++i) ofs << " " << policy_action_raw(i);
         ofs << "\naction_offset";
         for (int i = 0; i < kActDim; ++i) ofs << " " << action_offset(i);
+        VecXf target_joint_pos_policy = dof_pos_default_policy_ + action_offset;
+        ofs << "\ntarget_joint_pos_policy";
+        for (int i = 0; i < kActDim; ++i) ofs << " " << target_joint_pos_policy(i);
         ofs << "\ntarget_joint_pos";
         for (int i = 0; i < kActDim; ++i) ofs << " " << target_joint_pos(i);
         // Compute robot-order joint state for torque diagnostics.

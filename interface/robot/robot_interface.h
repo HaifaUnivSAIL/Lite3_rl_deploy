@@ -89,6 +89,14 @@ public:
     virtual Vec3f GetImuOmega() = 0;
 
     /**
+     * @brief Get base quaternion in (w, x, y, z) if available.
+     * Default returns identity.
+     */
+    virtual Vec4f GetImuQuat() {
+        return Vec4f(1.f, 0.f, 0.f, 0.f);
+    }
+
+    /**
      * @brief Set the joint command in standard form
      *                  torque = kp * (qDes - q) + kd * (vDes - v) + tff
      * @param  input       a dof_num*5 matrix and each column represent kp, goal_angle_pos, kd, goal_vel, torque_feedforward
