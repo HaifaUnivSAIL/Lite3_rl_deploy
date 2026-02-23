@@ -75,10 +75,18 @@ class MuJoCoSimulation:
 
         # IMU
         self.last_base_linvel = np.zeros((3, 1), np.float64)
+        # Angular velocity source used in UDP packet:
+        # - qvel_body (default): legacy behavior that previously matched deploy parity runs
+        # - world_to_body: convert qvel[3:6] from world frame to body frame
+        self.omega_source = os.environ.get("LITE3_MUJOCO_OMEGA_SOURCE", "qvel_body").strip().lower()
+        if self.omega_source not in {"qvel_body", "world_to_body"}:
+            print(f"[WARN] Unknown LITE3_MUJOCO_OMEGA_SOURCE={self.omega_source}, fallback to qvel_body")
+            self.omega_source = "qvel_body"
         self.timestamp = 0.0
         self.last_print_time = 0  # Track last print time
 
         print(f"[INFO] MuJoCo model loaded, dof = {self.dof_num}")
+        print(f"[INFO] omega_source = {self.omega_source}")
         if DEBUG_DUMPS > 0:
             self._dump_model_debug(xml_full)
 
@@ -278,7 +286,15 @@ class MuJoCoSimulation:
         # IMU
         q_world = self.data.qpos[3:7]
         rpy = self.quaternion_to_euler(q_world)
-        angvel_b = self.data.qvel[3:6]
+        if self.omega_source == "world_to_body":
+            angvel_w = self.data.qvel[3:6]
+            mat = np.zeros(9, dtype=np.float64)
+            mujoco.mju_quat2Mat(mat, q_world.astype(np.float64))
+            R = mat.reshape(3, 3)
+            angvel_b = (R.T @ angvel_w.reshape(3, 1)).reshape(3,)
+        else:
+            # Preserve legacy behavior by default.
+            angvel_b = self.data.qvel[3:6]
         body_acc = self.data.sensordata[16:19]
 
         # Joints

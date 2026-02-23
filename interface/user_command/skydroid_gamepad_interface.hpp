@@ -105,6 +105,15 @@ void SkydroidGamepadInterface::TransformSkydroidToUserCommand(){
             case RobotMotionState::StandingUp:
                 if(sd_keys_.right != sd_keys_record_.right){
                     usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                } else if (sd_keys_.B != sd_keys_record_.B) {
+                    usr_cmd_.target_mode = int(RobotMotionState::HindStand);
+                }
+                break;
+            case RobotMotionState::HindStand:
+                if(sd_keys_.right != sd_keys_record_.right){
+                    usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                } else if (sd_keys_.A != sd_keys_record_.A) {
+                    usr_cmd_.target_mode = int(RobotMotionState::StandingUp);
                 }
                 break;
             

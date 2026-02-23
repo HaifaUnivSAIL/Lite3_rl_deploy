@@ -18,7 +18,9 @@
 #include "state_base.h"
 #include "policy_runner_base.hpp"
 #include "lite3_test_policy_runner_onnx.hpp"
-#include "../interface/robot/simulation/mujoco_interface.hpp"
+#if defined(BUILD_SIMULATION) && defined(USE_MJCPP)
+    #include "../interface/robot/simulation/mujoco_interface.hpp"
+#endif
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <cmath>
@@ -172,6 +174,7 @@ private:
     }
 
     void ConfigurePolicyTimingFromSim() {
+#if defined(BUILD_SIMULATION) && defined(USE_MJCPP)
         auto mujoco_if = std::dynamic_pointer_cast<interface::MujocoInterface>(ri_ptr_);
         if (!mujoco_if) {
             return;
@@ -205,6 +208,7 @@ private:
         std::cout << "[RLControlStateONNX] sim_dt=" << sim_dt
                   << ", policy_decimation=" << decimation
                   << ", policy_control_dt=" << applied_ctrl_dt << "s" << std::endl;
+#endif
     }
 
 public:
@@ -245,9 +249,11 @@ public:
         if (async_policy_mode_) {
             run_policy_thread_ = std::thread(std::bind(&RLControlStateONNX::PolicyRunner, this));
         }
+#if defined(BUILD_SIMULATION) && defined(USE_MJCPP)
         if (auto mujoco_if = std::dynamic_pointer_cast<interface::MujocoInterface>(ri_ptr_)) {
             mujoco_if->PrintFullState();
         }
+#endif
         StateBase::msfb_.UpdateCurrentState(RobotMotionState::RLControlMode);
         uc_ptr_->SetMotionStateFeedback(StateBase::msfb_);
     };

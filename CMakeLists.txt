@@ -8,23 +8,22 @@ add_compile_options(-fPIC)
 
 # ========== 控制选项 ==========
 set(BUILD_PLATFORM "x86" CACHE STRING "select build cpu type")
-option(BUILD SIM OFF)
-option(USE_RAISIM OFF)
-set(USE_PYBULLET ON)
-set(USE_RAISIM OFF)
+option(BUILD_SIM "build with simulator interface" OFF)
+option(USE_RAISIM "use Raisim simulator backend" OFF)
+option(USE_PYBULLET "use PyBullet UDP simulator backend" ON)
 option(SEND_REMOTE OFF)
 # option(USE_ONNX "Use ONNXRuntime" ON)
 option(USE_MJCPP "Use Mujoco C++" OFF)
 
 
 
-if (BUILD_PLATFORM STREQUAL arm)
+if (BUILD_PLATFORM STREQUAL "arm")
   message("this is arm platform")
   set(BUILD_SIM OFF)
-  set(CMAKE_C_COMPILER "aarch64-linux-gnu-gcc")
-  set(CMAKE_CXX_COMPILER "aarch64-linux-gnu-g++") 
-else()
+elseif (BUILD_PLATFORM STREQUAL "x86")
   message("this is x86 platform")
+else()
+  message(FATAL_ERROR "Unsupported BUILD_PLATFORM='${BUILD_PLATFORM}'. Use x86 or arm.")
 endif()
 set(CMAKE_CXX_STANDARD 17)
 
@@ -36,6 +35,8 @@ endif()
 message("BUILD_PLATFORM: ${BUILD_PLATFORM}")
 message("BUILD_SIM:      ${BUILD_SIM}")
 message("SEND_REMOTE:    ${SEND_REMOTE}")
+message("USE_PYBULLET:   ${USE_PYBULLET}")
+message("USE_RAISIM:     ${USE_RAISIM}")
 # message("USE_ONNX:       ${USE_ONNX}")
 message("USE_MJCPP:      ${USE_MJCPP}")
 
@@ -64,13 +65,15 @@ include_directories(${ONNX_RUNTIME_ROOT}/include)
 link_directories(${ONNX_RUNTIME_ROOT}/lib)
 
 
-# MuJoCo
-set(MUJOCO_ROOT "${THIRD_PARTY}/mujoco/${BUILD_PLATFORM}")
-message("USE_MJCPP enabled, loading MuJoCo headers from ${MUJOCO_ROOT}")
-if (USE_MJCPP)
+# MuJoCo (only needed for C++ MuJoCo simulator backend)
+if (BUILD_SIM AND USE_MJCPP)
+  set(MUJOCO_ROOT "${THIRD_PARTY}/mujoco/${BUILD_PLATFORM}")
+  message("USE_MJCPP enabled, loading MuJoCo headers from ${MUJOCO_ROOT}")
   add_definitions(-DUSE_MJCPP)
   include_directories(${MUJOCO_ROOT}/include)
   link_directories(${MUJOCO_ROOT}/lib)
+elseif (USE_MJCPP)
+  message(WARNING "USE_MJCPP=ON is ignored when BUILD_SIM=OFF.")
 endif()
 
 
@@ -91,7 +94,6 @@ include_directories(
   run_policy
   # ${TORCH_INCLUDE_DIRS}
   ${ONNX_RUNTIME_ROOT}/include
-  ${MUJOCO_ROOT}/include
 )
 
 # ========== 添加 interface 子模块 ==========
@@ -99,23 +101,29 @@ add_subdirectory(interface)
 
 # ========== 仿真器宏定义 ==========
 if (BUILD_SIM)
-message("USE_PYBULLET:    ${USE_PYBULLET}")
+  if(USE_RAISIM AND USE_MJCPP)
+    message(FATAL_ERROR "USE_RAISIM and USE_MJCPP cannot both be ON.")
+  endif()
+  # Keep compatibility: selecting MuJoCo or Raisim disables PyBullet backend.
+  if (USE_MJCPP OR USE_RAISIM)
+    set(USE_PYBULLET OFF)
+  endif()
 
   if(USE_RAISIM)
+    set(SIM_BACKEND "raisim")
     add_definitions(-DUSE_RAISIM)
     set(raisim_DIR "your path to raisim")
     find_package(raisim CONFIG REQUIRED)
-  elseif(USE_PYBULLET)
-    add_definitions(-DUSE_PYBULLET)
   elseif(USE_MJCPP)
-    set(MUJOCO_ROOT "${THIRD_PARTY}/mujoco/${BUILD_PLATFORM}")
-    message("USE_MJCPP enabled, loading MuJoCo headers from ${MUJOCO_ROOT}")
-    add_definitions(-DUSE_MJCPP)
-    include_directories(${MUJOCO_ROOT}/include)
-    link_directories(${MUJOCO_ROOT}/lib)
+    set(SIM_BACKEND "mujoco_cpp")
+    # USE_MJCPP definition and include/link dirs are configured above.
+  elseif(USE_PYBULLET)
+    set(SIM_BACKEND "pybullet_udp")
+    add_definitions(-DUSE_PYBULLET)
   else()
     message(FATAL_ERROR "No simulation option selected. Please select one of USE_RAISIM, USE_PYBULLET, or USE_MJCPP.")
   endif()
+  message("SIM_BACKEND:    ${SIM_BACKEND}")
 endif()
 
 # ========== 设置部署路径 ==========
@@ -154,19 +162,21 @@ if (BUILD_SIM)
   endif()
 endif()
 
-if (BUILD_SIM)
-  link_directories(${THIRD_PARTY}/Lite3_MotionSDK/lib)
+link_directories(${THIRD_PARTY}/Lite3_MotionSDK/lib)
+if (BUILD_PLATFORM STREQUAL "x86")
   target_link_libraries(rl_deploy
       ${PROJECT_SOURCE_DIR}/third_party/Lite3_MotionSDK/lib/libdeeprobotics_legged_sdk_x86_64.so
       pthread
       rt
   )
-else()
+elseif (BUILD_PLATFORM STREQUAL "arm")
   target_link_libraries(rl_deploy
       ${PROJECT_SOURCE_DIR}/third_party/Lite3_MotionSDK/lib/libdeeprobotics_legged_sdk_aarch64.so
       pthread
       rt
   )
+else()
+  message(FATAL_ERROR "Unsupported BUILD_PLATFORM='${BUILD_PLATFORM}' for SDK library selection.")
 endif()
 
 if (BUILD_SIM)

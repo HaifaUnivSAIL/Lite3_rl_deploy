@@ -27,7 +27,7 @@ include_directories(${LITE3_MOTION_SDK_PATH}/include)
 file(GLOB_RECURSE LITE3_MOTION_SDK_SRC "${LITE3_MOTION_SDK_PATH}/src/*.cpp")
 
 # ==== Mujoco Interface ====
-if (USE_MJCPP)
+if (BUILD_SIM AND USE_MJCPP)
   message(STATUS "✅ USE_MJCPP is ON. Including MujocoInterface headers.")
   set(MUJOCO_ROOT "${THIRD_PARTY}/mujoco/${BUILD_PLATFORM}")
   include_directories(${MUJOCO_ROOT}/include)

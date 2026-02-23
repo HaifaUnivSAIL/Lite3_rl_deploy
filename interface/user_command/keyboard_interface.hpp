@@ -99,8 +99,17 @@ public:
                             }
                         break;
                         case RobotMotionState::StandingUp:
+                            if(input=='x'){
+                                usr_cmd_.target_mode = int(RobotMotionState::HindStand);
+                            }else if(input=='c'){
+                                usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                            }
+                        break;
+                        case RobotMotionState::HindStand:
                             if(input=='c'){
                                 usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                            }else if(input=='z'){
+                                usr_cmd_.target_mode = int(RobotMotionState::StandingUp);
                             }
                         break;
                         case RobotMotionState::RLControlMode:
@@ -126,8 +135,17 @@ public:
                         }
                     break;
                     case RobotMotionState::StandingUp:
+                        if(input=='x'){
+                            usr_cmd_.target_mode = int(RobotMotionState::HindStand);
+                        }else if(input=='c'){
+                            usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                        }
+                    break;
+                    case RobotMotionState::HindStand:
                         if(input=='c'){
                             usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                        }else if(input=='z'){
+                            usr_cmd_.target_mode = int(RobotMotionState::StandingUp);
                         }
                     break;
                     case RobotMotionState::RLControlMode:

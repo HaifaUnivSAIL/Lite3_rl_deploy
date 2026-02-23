@@ -14,6 +14,7 @@
 #include "state_base.h"
 #include "idle_state.hpp"
 #include "standup_state.hpp"
+#include "hind_stand_state.hpp"
 #include "joint_damping_state.hpp"
 
 // #ifdef USE_ONNX
@@ -34,7 +35,7 @@
     #include "simulation/pybullet_interface.hpp"
 #endif
 
-#ifdef USE_MJCPP
+#if defined(BUILD_SIMULATION) && defined(USE_MJCPP)
     #include "simulation/mujoco_interface.hpp"
 #endif
 
@@ -46,6 +47,7 @@ private:
     std::shared_ptr<StateBase> current_controller_;
     std::shared_ptr<StateBase> idle_controller_;
     std::shared_ptr<StateBase> standup_controller_;
+    std::shared_ptr<StateBase> hind_stand_controller_;
     std::shared_ptr<StateBase> rl_controller_;
     std::shared_ptr<StateBase> joint_damping_controller_;
 
@@ -104,6 +106,9 @@ private:
             case StateName::kJointDamping:{
                 return joint_damping_controller_;
             }
+            case StateName::kHindStand:{
+                return hind_stand_controller_;
+            }
             default:{
                 std::cerr << "error state name" << std::endl;
             }
@@ -151,6 +156,7 @@ public:
 
         idle_controller_ = std::make_shared<IdleState>(robot_type, "idle_state", data_ptr);
         standup_controller_ = std::make_shared<StandUpState>(robot_type, "standup_state", data_ptr);
+        hind_stand_controller_ = std::make_shared<HindStandState>(robot_type, "hind_stand_state", data_ptr);
 
         // 测试ONNX，后续需要改成参数控制
         // rl_controller_ = std::make_shared<RLControlState>(robot_type, "rl_control", data_ptr);

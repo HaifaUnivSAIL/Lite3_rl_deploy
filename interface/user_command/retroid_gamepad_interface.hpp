@@ -92,6 +92,15 @@ void RetroidGamepadInterface::TransformRetroidToUserCommand(){
             case RobotMotionState::StandingUp:
                 if(rt_keys_.A != rt_keys_record_.A){
                     usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                } else if (rt_keys_.B != rt_keys_record_.B) {
+                    usr_cmd_.target_mode = int(RobotMotionState::HindStand);
+                }
+                break;
+            case RobotMotionState::HindStand:
+                if(rt_keys_.A != rt_keys_record_.A){
+                    usr_cmd_.target_mode = int(RobotMotionState::RLControlMode);
+                } else if (rt_keys_.Y != rt_keys_record_.Y) {
+                    usr_cmd_.target_mode = int(RobotMotionState::StandingUp);
                 }
                 break;
             

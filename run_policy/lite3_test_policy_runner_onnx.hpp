@@ -166,6 +166,7 @@ public:
             base_rpy,
             projected_gravity,
             body_omega,
+            ro.base_acc,
             omega_world,
             ro.base_quat,
             ro.base_rot_mat,
@@ -759,6 +760,7 @@ private:
                               const Vec3f& base_rpy,
                               const Vec3f& projected_gravity,
                               const Vec3f& body_omega,
+                              const Vec3f& base_acc,
                               const Vec3f& omega_world,
                               const Vec4f& base_quat_wxyz,
                               const Mat3f& base_rot_mat,
@@ -830,6 +832,8 @@ private:
         for (int i = 0; i < 3; ++i) ofs << " " << projected_gravity(i);
         ofs << "\nbody_omega";
         for (int i = 0; i < 3; ++i) ofs << " " << body_omega(i);
+        ofs << "\nbase_acc";
+        for (int i = 0; i < 3; ++i) ofs << " " << base_acc(i);
         ofs << "\nomega_world";
         for (int i = 0; i < 3; ++i) ofs << " " << omega_world(i);
         ofs << "\nbase_quat_wxyz";

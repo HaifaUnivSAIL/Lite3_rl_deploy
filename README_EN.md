@@ -42,6 +42,7 @@ cd build
 tips：right click simulator window and select "always on top"
 
 - z： default position
+- x： switch to hind-leg stand from stand-up state
 - c： rl control default position
 - wasd：forward/leftward/backward/rightward
 - qe：clockwise/counter clockwise

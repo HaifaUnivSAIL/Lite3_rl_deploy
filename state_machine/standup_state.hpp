@@ -141,6 +141,9 @@ public:
         if(run_time_ - time_stamp_record_ <= 2.*stand_duration_){
             return StateName::kStandUp;
         }else{
+            if(uc_ptr_->GetUserCommand().target_mode == int(RobotMotionState::HindStand)){
+                return StateName::kHindStand;
+            }
             if(uc_ptr_->GetUserCommand().target_mode == int(RobotMotionState::RLControlMode)){
                 return StateName::kRLControl;
                 std::cout << "stand up success" << std::endl;

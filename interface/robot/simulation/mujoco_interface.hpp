@@ -22,6 +22,7 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <array>
@@ -70,6 +71,7 @@ private:
     }};
 
     int render_interval_ = 10;
+    bool omega_source_world_to_body_ = false;
 
     std::default_random_engine dre_;
     std::normal_distribution<> gyro_nd_{0.0, 0.0}, rpy_nd_{0.0, 0.0}, acc_nd_{0.0, 0.0};
@@ -137,6 +139,21 @@ public:
         if (const char* clip_env = std::getenv("LITE3_TAU_CLIP_TRAINING_LIMITS")) {
             clip_tau_to_training_limits_ = std::atoi(clip_env) != 0;
         }
+        // Keep hardware-aligned convention by default:
+        // qvel[3:6] is forwarded as body omega unless explicitly overridden.
+        std::string omega_source = "qvel_body";
+        if (const char* omega_env = std::getenv("LITE3_MUJOCO_OMEGA_SOURCE")) {
+            omega_source = omega_env;
+            std::transform(omega_source.begin(), omega_source.end(), omega_source.begin(),
+                           [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        }
+        if (omega_source == "world_to_body") {
+            omega_source_world_to_body_ = true;
+        } else if (omega_source != "qvel_body") {
+            std::cerr << "[MuJoCoInterface][WARN] Unknown LITE3_MUJOCO_OMEGA_SOURCE='"
+                      << omega_source << "', fallback to qvel_body\n";
+            omega_source_world_to_body_ = false;
+        }
         gyro_nd_ = std::normal_distribution<>(0.0, gyro_noise_std);
         rpy_nd_ = std::normal_distribution<>(0.0, rpy_noise_std);
         acc_nd_ = std::normal_distribution<>(0.0, acc_noise_std);
@@ -145,6 +162,8 @@ public:
         std::cout << "[MuJoCoInterface] imu_noise_std rpy=" << rpy_noise_std
                   << " gyro=" << gyro_noise_std
                   << " acc=" << acc_noise_std << std::endl;
+        std::cout << "[MuJoCoInterface] omega_source="
+                  << (omega_source_world_to_body_ ? "world_to_body" : "qvel_body") << std::endl;
         std::cout << "[MuJoCoInterface] tau_clip_training_limits="
                   << (clip_tau_to_training_limits_ ? "on" : "off") << std::endl;
 
@@ -299,12 +318,14 @@ private:
 
         acc_ = Eigen::Map<Vec3d>(data_->sensordata + 16);
 
-        // MuJoCo free-joint angular velocity is provided in world frame. Convert to body frame
-        // to match training observations (base_ang_vel in body frame).
-        Vec3d omega_world = Eigen::Map<Vec3d>(data_->qvel + 3);
-        Eigen::Quaterniond quat_world_from_body(qw, qx, qy, qz);
-        quat_world_from_body.normalize();
-        Vec3d omega_body = quat_world_from_body.conjugate() * omega_world;
+        Vec3d omega_body = Eigen::Map<Vec3d>(data_->qvel + 3);
+        if (omega_source_world_to_body_) {
+            // Debug-only alternative path for convention checks.
+            Vec3d omega_world = omega_body;
+            Eigen::Quaterniond quat_world_from_body(qw, qx, qy, qz);
+            quat_world_from_body.normalize();
+            omega_body = quat_world_from_body.conjugate() * omega_world;
+        }
         omega_body_ = omega_body + Vec3d(gyro_nd_(dre_), gyro_nd_(dre_), gyro_nd_(dre_));
 
         // std::cout << "[IMU] RPY: " << rpy_.transpose()
