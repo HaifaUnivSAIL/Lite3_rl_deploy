@@ -66,9 +66,12 @@ public:
         last_action_offset_.setZero(kActDim);
         SeedHistoryWithZeros();
         LoadHistorySeedFromFileEnv();
+        ResolveBaseRpySourceFromEnv();
         debug_dump_quota_ = ParseDebugQuota();
         std::cout << "[ONNX ENTER] History cleared. PolicyRunner entered: "
-                  << policy_name_ << std::endl;
+                  << policy_name_
+                  << ", base_rpy_source=" << base_rpy_source_label_
+                  << std::endl;
     }
 
     RobotAction GetRobotAction(const RobotBasicState& ro) override {
@@ -79,22 +82,29 @@ public:
         Vec3f cmd = ro.cmd_vel_normlized;
         SaturateVec3(cmd, -1.f, 1.f);
 
-        // Match training observation helper in
-        // rl_training_new/.../two_leg_stand/mdp/observations.py:
-        // it consumes root_quat_w with legacy XYZW interpretation.
+        // Build base_rpy according to selected deploy convention.
         const bool quat_valid = ro.base_quat.allFinite() && ro.base_quat.norm() > 1e-6f;
         const Vec4f quat_identity(1.f, 0.f, 0.f, 0.f);
         const bool quat_is_identity = quat_valid &&
             (ro.base_quat - quat_identity).cwiseAbs().maxCoeff() < 1e-6f;
-        // Some interfaces do not provide quaternion and fall back to identity.
-        // Keep the previously working parity path: use rotmat on step0 in that case,
-        // then switch to quaternion mapping after the first policy step.
-        Vec3f base_rpy = (quat_valid && !(quat_is_identity && run_cnt_ == 0))
+        const bool use_rotmat_fallback = quat_is_identity && run_cnt_ == 0;
+        const Vec3f base_rpy_interface = ro.base_rpy;
+        const Vec3f base_rpy_from_quat_std = (quat_valid && !use_rotmat_fallback)
+            ? ComputeRpyFromQuatWxyzStandard(ro.base_quat.normalized())
+            : ComputeRpyFromRotMatStandard(ro.base_rot_mat);
+        const Vec3f base_rpy_from_quat_legacy = (quat_valid && !use_rotmat_fallback)
             ? ComputeTrainingLegacyRpyFromQuatWxyz(ro.base_quat.normalized())
             : ComputeTrainingLegacyRpyFromRotMat(ro.base_rot_mat);
-        // Canonicalize the first policy-step +/-pi branch to a stable negative representative.
-        // This removes reset-time branch ambiguity while preserving later-step dynamics.
-        if (run_cnt_ == 0) {
+
+        Vec3f base_rpy = base_rpy_interface;
+        if (base_rpy_source_ == BaseRpySourceMode::kQuatWxyzStandard) {
+            base_rpy = base_rpy_from_quat_std;
+        } else if (base_rpy_source_ == BaseRpySourceMode::kQuatLegacyXyzw) {
+            base_rpy = base_rpy_from_quat_legacy;
+        }
+
+        // Keep first-step +/-pi canonicalization only for legacy mode fallback.
+        if (base_rpy_source_ == BaseRpySourceMode::kQuatLegacyXyzw && run_cnt_ == 0) {
             base_rpy(0) = CanonicalizePiBranchNegative(base_rpy(0));
         }
         Vec3f projected_gravity = ro.projected_gravity;
@@ -164,6 +174,9 @@ public:
             action_raw_,
             cmd,
             base_rpy,
+            base_rpy_interface,
+            base_rpy_from_quat_std,
+            base_rpy_from_quat_legacy,
             projected_gravity,
             body_omega,
             ro.base_acc,
@@ -182,6 +195,12 @@ public:
     }
 
 private:
+    enum class BaseRpySourceMode {
+        kInterfaceRpy = 0,
+        kQuatWxyzStandard = 1,
+        kQuatLegacyXyzw = 2,
+    };
+
     static constexpr int   kObsDim        = 117;
     static constexpr int   kHistoryLen    = 40;
     static constexpr int   kTotalInputDim = kObsDim * (1 + kHistoryLen);
@@ -236,6 +255,8 @@ private:
     std::vector<float> history_seed_vel_hist_;
     std::vector<float> history_seed_act_hist_;
     std::vector<float> history_seed_obs_hist_;
+    BaseRpySourceMode base_rpy_source_ = BaseRpySourceMode::kInterfaceRpy;
+    std::string base_rpy_source_label_ = "interface_rpy";
 
     void InitSession() {
         // Allow overriding model path without recompiling.
@@ -254,14 +275,26 @@ private:
         input_names_.push_back("obs");
         output_names_.push_back("action");
         LogModelInfo();
-        // Match training control period by default.
-        // Training uses sim.dt=0.005 and decimation=4 => control_dt=0.02s.
+        // Match training control period by default (target control_dt = 0.02s).
+        // Backend-specific default dt:
+        // - legacy UDP sim path (USE_PYBULLET): 1kHz interface loop (dt=0.001)
+        // - MuJoCo C++ path: dt=0.005 unless overridden
+        // - hardware path: keep conservative 1kHz assumption (dt=0.001)
         double sim_dt = 0.005;
+        const char* sim_dt_source = "default_mujoco_cpp";
+#if defined(BUILD_SIMULATION) && defined(USE_PYBULLET)
+        sim_dt = 0.001;
+        sim_dt_source = "default_legacy_udp";
+#elif !defined(BUILD_SIMULATION)
+        sim_dt = 0.001;
+        sim_dt_source = "default_hardware";
+#endif
         if (const char* dt_env = std::getenv("LITE3_MUJOCO_DT")) {
             char* endptr = nullptr;
             const double parsed = std::strtod(dt_env, &endptr);
             if (endptr != dt_env && std::isfinite(parsed) && parsed > 0.0) {
                 sim_dt = parsed;
+                sim_dt_source = "env:LITE3_MUJOCO_DT";
             }
         }
         decimation_ = std::max(1, static_cast<int>(std::lround(0.02 / sim_dt)));
@@ -274,7 +307,8 @@ private:
         const double ctrl_dt = sim_dt * static_cast<double>(decimation_);
         std::cout << "[ONNX] sim_dt=" << sim_dt
                   << ", decimation=" << decimation_
-                  << ", control_dt=" << ctrl_dt << "s" << std::endl;
+                  << ", control_dt=" << ctrl_dt << "s"
+                  << ", sim_dt_source=" << sim_dt_source << std::endl;
     }
 
     void InitRobotConstants() {
@@ -360,6 +394,35 @@ private:
             }
         }
         return inv;
+    }
+
+    static Vec3f ComputeRpyFromQuatWxyzStandard(const Vec4f& quat_wxyz) {
+        const float w = quat_wxyz(0);
+        const float x = quat_wxyz(1);
+        const float y = quat_wxyz(2);
+        const float z = quat_wxyz(3);
+
+        const float sinr_cosp = 2.0f * (w * x + y * z);
+        const float cosr_cosp = 1.0f - 2.0f * (x * x + y * y);
+        const float roll = std::atan2(sinr_cosp, cosr_cosp);
+
+        float sinp = 2.0f * (w * y - z * x);
+        sinp = std::max(-1.0f, std::min(1.0f, sinp));
+        const float pitch = std::asin(sinp);
+
+        const float siny_cosp = 2.0f * (w * z + x * y);
+        const float cosy_cosp = 1.0f - 2.0f * (y * y + z * z);
+        const float yaw = std::atan2(siny_cosp, cosy_cosp);
+
+        return Vec3f(roll, pitch, yaw);
+    }
+
+    static Vec3f ComputeRpyFromRotMatStandard(const Mat3f& rot_mat) {
+        Eigen::Quaternionf q(rot_mat);
+        q.normalize();
+        Vec4f quat_wxyz;
+        quat_wxyz << q.w(), q.x(), q.y(), q.z();
+        return ComputeRpyFromQuatWxyzStandard(quat_wxyz);
     }
 
     static Vec3f ComputeTrainingLegacyRpyFromQuatWxyz(const Vec4f& quat_wxyz) {
@@ -684,6 +747,41 @@ private:
         }
     }
 
+    static const char* BaseRpySourceToString(BaseRpySourceMode mode) {
+        switch (mode) {
+            case BaseRpySourceMode::kInterfaceRpy:
+                return "interface_rpy";
+            case BaseRpySourceMode::kQuatWxyzStandard:
+                return "quat_wxyz_standard";
+            case BaseRpySourceMode::kQuatLegacyXyzw:
+                return "quat_legacy_xyzw";
+            default:
+                return "interface_rpy";
+        }
+    }
+
+    void ResolveBaseRpySourceFromEnv() {
+        const char* env = std::getenv("LITE3_BASE_RPY_SOURCE");
+        BaseRpySourceMode mode = BaseRpySourceMode::kInterfaceRpy;
+        if (env && *env != '\0') {
+            const std::string requested(env);
+            if (requested == "interface_rpy" || requested == "imu_rpy") {
+                mode = BaseRpySourceMode::kInterfaceRpy;
+            } else if (requested == "quat_wxyz_standard" || requested == "quat_standard") {
+                mode = BaseRpySourceMode::kQuatWxyzStandard;
+            } else if (requested == "quat_legacy_xyzw" || requested == "legacy_xyzw") {
+                mode = BaseRpySourceMode::kQuatLegacyXyzw;
+            } else {
+                std::cerr << "[ONNX] Unknown LITE3_BASE_RPY_SOURCE='" << requested
+                          << "'. Falling back to interface_rpy." << std::endl;
+                mode = BaseRpySourceMode::kInterfaceRpy;
+            }
+        }
+        base_rpy_source_ = mode;
+        base_rpy_source_label_ = BaseRpySourceToString(mode);
+        std::cout << "[ONNX] base_rpy source mode: " << base_rpy_source_label_ << std::endl;
+    }
+
     static uint64_t Fnv1a64File(const std::string& path, size_t* out_size) {
         std::ifstream ifs(path, std::ios::binary);
         if (!ifs.is_open()) {
@@ -758,6 +856,9 @@ private:
                               const VecXf& policy_action_raw,
                               const Vec3f& cmd,
                               const Vec3f& base_rpy,
+                              const Vec3f& base_rpy_interface,
+                              const Vec3f& base_rpy_from_quat_std,
+                              const Vec3f& base_rpy_from_quat_legacy,
                               const Vec3f& projected_gravity,
                               const Vec3f& body_omega,
                               const Vec3f& base_acc,
@@ -828,6 +929,13 @@ private:
         for (int i = 0; i < 3; ++i) ofs << " " << cmd(i);
         ofs << "\nbase_rpy";
         for (int i = 0; i < 3; ++i) ofs << " " << base_rpy(i);
+        ofs << "\nbase_rpy_source " << base_rpy_source_label_;
+        ofs << "\nbase_rpy_interface";
+        for (int i = 0; i < 3; ++i) ofs << " " << base_rpy_interface(i);
+        ofs << "\nbase_rpy_from_quat_std";
+        for (int i = 0; i < 3; ++i) ofs << " " << base_rpy_from_quat_std(i);
+        ofs << "\nbase_rpy_from_quat_legacy";
+        for (int i = 0; i < 3; ++i) ofs << " " << base_rpy_from_quat_legacy(i);
         ofs << "\nprojected_gravity";
         for (int i = 0; i < 3; ++i) ofs << " " << projected_gravity(i);
         ofs << "\nbody_omega";
@@ -849,8 +957,11 @@ private:
         ofs << "\njoint_vel_policy";
         for (int i = 0; i < kActDim; ++i) ofs << " " << joint_vel_policy(i);
         ofs << "\nobs_contract cmd:3 base_rpy:3 body_omega:3 joint_pos:12 joint_vel:12 joint_pos_history:36 joint_vel_history:24 action_history:24";
-        ofs << "\nparity_build_id 2026-02-16-rpy-from-quat-history-abs-noise0-quat-fallback-rpy-actionhist-zero-delay1-rpy-step0-pi-canonical-neg";
-        ofs << "\nbase_rpy_mode legacy_xyzw_from_rotmat_step0_pi_canonical_neg";
+        ofs << "\nparity_build_id 2026-02-23-base-rpy-source-selector";
+        ofs << "\nbase_rpy_mode " << base_rpy_source_label_;
+        if (base_rpy_source_ == BaseRpySourceMode::kQuatLegacyXyzw) {
+            ofs << "_step0_pi_canonical_neg";
+        }
         ofs << "\nhistory_frame_push_mode single_first_step";
         ofs << "\naction_history_mode "
             << (action_hist_delayed_mode_ ? "training_parity_zero_seed_delay1" : (history_seed_mode_ + "_direct"));

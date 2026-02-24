@@ -37,6 +37,11 @@ cd build
 ./rl_deploy
 ```
 
+Default timing note:
+
+- In legacy UDP simulation mode (`BUILD_SIM=ON`, `USE_PYBULLET=ON`), deploy now defaults to a `0.001s` interface period assumption and `decimation=20`, so policy control period is `0.02s` (aligned with training: decimation=4, sim.dt=0.005).
+- For debug overrides you can still use `LITE3_MUJOCO_DT` and `LITE3_POLICY_DECIMATION`.
+
 ## Usage(Terminal 2)
 
 tips：right click simulator window and select "always on top"
