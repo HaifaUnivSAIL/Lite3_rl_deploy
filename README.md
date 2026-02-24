@@ -42,6 +42,7 @@ cd build
 
 - 在 `BUILD_SIM=ON` 且 `USE_PYBULLET=ON` 的 legacy UDP 仿真路径下，部署默认按 `0.001s` 接口周期计算策略抽样，默认 `decimation=20`，即策略控制周期 `0.02s`（与训练侧 decimation=4, sim.dt=0.005 对齐）。
 - 如需调试覆盖，仍可使用环境变量 `LITE3_MUJOCO_DT`、`LITE3_POLICY_DECIMATION`。
+- 启动时会执行时序一致性断言（training vs deploy control period）。若训练侧时序有意修改，可用 `LITE3_TRAINING_SIM_DT`、`LITE3_TRAINING_DECIMATION` 覆盖断言基线。
 
 ### 操控(终端2)
 

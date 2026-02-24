@@ -20,6 +20,9 @@ unset LITE3_POSTURE_LIMIT_PITCH_DEG
 unset LITE3_POLICY_ASYNC
 unset LITE3_POLICY_DECIMATION
 unset LITE3_POLICY_CONTROL_DT
+unset LITE3_TRAINING_DECIMATION
+unset LITE3_TRAINING_SIM_DT
+unset LITE3_TIMING_ASSERT_TOL
 unset LITE3_MUJOCO_DT
 unset LITE3_MUJOCO_OMEGA_SOURCE
 unset LITE3_RANDOM_RESET
@@ -45,3 +48,5 @@ export LITE3_DEBUG_DUMPS="${LITE3_DEBUG_DUMPS:-5}"
 # export LITE3_POSTURE_LIMIT_ROLL_DEG=40
 # export LITE3_POSTURE_LIMIT_PITCH_DEG=90
 # export LITE3_MUJOCO_OMEGA_SOURCE="world_to_body"  # debug only; baseline is qvel_body
+# export LITE3_TRAINING_DECIMATION=4               # timing assert expectation override
+# export LITE3_TRAINING_SIM_DT=0.005               # timing assert expectation override

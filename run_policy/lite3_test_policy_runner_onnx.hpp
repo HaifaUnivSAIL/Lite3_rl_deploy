@@ -258,6 +258,74 @@ private:
     BaseRpySourceMode base_rpy_source_ = BaseRpySourceMode::kInterfaceRpy;
     std::string base_rpy_source_label_ = "interface_rpy";
 
+    static int ParsePositiveIntEnv(const char* env_name, int fallback) {
+        const char* env_val = std::getenv(env_name);
+        if (!env_val) {
+            return fallback;
+        }
+        char* endptr = nullptr;
+        long parsed = std::strtol(env_val, &endptr, 10);
+        if (endptr == env_val || !std::isfinite(static_cast<double>(parsed)) || parsed <= 0) {
+            return fallback;
+        }
+        return static_cast<int>(parsed);
+    }
+
+    static double ParsePositiveDoubleEnv(const char* env_name, double fallback) {
+        const char* env_val = std::getenv(env_name);
+        if (!env_val) {
+            return fallback;
+        }
+        char* endptr = nullptr;
+        const double parsed = std::strtod(env_val, &endptr);
+        if (endptr == env_val || !std::isfinite(parsed) || parsed <= 0.0) {
+            return fallback;
+        }
+        return parsed;
+    }
+
+    void AssertTrainingDeployTimingParity(double deploy_sim_dt, int deploy_decimation) const {
+        // Source-of-truth defaults from rl_training_new TwoLegStandEnvCfg:
+        //   decimation=4, sim.dt=0.005 -> control_dt=0.02s
+        const int training_decimation =
+            ParsePositiveIntEnv("LITE3_TRAINING_DECIMATION", 4);
+        const double training_sim_dt =
+            ParsePositiveDoubleEnv("LITE3_TRAINING_SIM_DT", 0.005);
+        const double tol =
+            ParsePositiveDoubleEnv("LITE3_TIMING_ASSERT_TOL", 1.0e-6);
+
+        const double training_control_dt =
+            training_sim_dt * static_cast<double>(training_decimation);
+        const double deploy_control_dt =
+            deploy_sim_dt * static_cast<double>(deploy_decimation);
+        const int expected_deploy_decimation =
+            std::max(1, static_cast<int>(std::lround(training_control_dt / deploy_sim_dt)));
+
+        const bool decimation_match = (deploy_decimation == expected_deploy_decimation);
+        const bool control_dt_match = std::fabs(deploy_control_dt - training_control_dt) <= tol;
+
+        std::cout << "[ONNX] timing parity check: "
+                  << "training(sim_dt=" << training_sim_dt
+                  << ", decimation=" << training_decimation
+                  << ", control_dt=" << training_control_dt << "s) vs "
+                  << "deploy(sim_dt=" << deploy_sim_dt
+                  << ", decimation=" << deploy_decimation
+                  << ", control_dt=" << deploy_control_dt << "s)"
+                  << std::endl;
+
+        if (!decimation_match || !control_dt_match) {
+            std::cerr << "[ONNX][FATAL] training/deploy timing mismatch. "
+                      << "expected deploy decimation=" << expected_deploy_decimation
+                      << ", got=" << deploy_decimation
+                      << "; expected control_dt=" << training_control_dt
+                      << "s, got=" << deploy_control_dt << "s. "
+                      << "Override with LITE3_TRAINING_DECIMATION / LITE3_TRAINING_SIM_DT "
+                      << "only if you intentionally changed training timing."
+                      << std::endl;
+            std::exit(2);
+        }
+    }
+
     void InitSession() {
         // Allow overriding model path without recompiling.
         // - Absolute path: used as-is
@@ -304,6 +372,7 @@ private:
                 decimation_ = parsed;
             }
         }
+        AssertTrainingDeployTimingParity(sim_dt, decimation_);
         const double ctrl_dt = sim_dt * static_cast<double>(decimation_);
         std::cout << "[ONNX] sim_dt=" << sim_dt
                   << ", decimation=" << decimation_

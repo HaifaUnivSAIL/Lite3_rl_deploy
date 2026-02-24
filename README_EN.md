@@ -41,6 +41,7 @@ Default timing note:
 
 - In legacy UDP simulation mode (`BUILD_SIM=ON`, `USE_PYBULLET=ON`), deploy now defaults to a `0.001s` interface period assumption and `decimation=20`, so policy control period is `0.02s` (aligned with training: decimation=4, sim.dt=0.005).
 - For debug overrides you can still use `LITE3_MUJOCO_DT` and `LITE3_POLICY_DECIMATION`.
+- A startup timing-parity assert is enforced (training vs deploy control period). If training timing was intentionally changed, override the assert baseline with `LITE3_TRAINING_SIM_DT` and `LITE3_TRAINING_DECIMATION`.
 
 ## Usage(Terminal 2)
 
